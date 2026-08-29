@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# MNIST-Rohdaten (werden beim Lauf automatisch geholt)
+mnist/
+data/
+
+# Trainings-Logs / temporäre Dateien
+*_log.txt
+*_err.txt
+*_pid.txt
+
+# OS
+.DS_Store
+Thumbs.db
