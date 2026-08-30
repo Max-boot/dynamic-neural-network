@@ -18,14 +18,16 @@ Kernidee: Statt das Neuronennetz nur anhand von Heuristiken (z. B. mittlere Akti
 |-------|-------|
 | `structural_ml_mnist.py` | Platzhalter/Basis-Idee + passives Fallback-Pruning (alte Version) |
 | `structural_ml_mnist_v2.py` | Implementierter ML-Kontroller (trainierter Scorer) + acc-bewusstes Gate ("WANN"); Vergleich Baseline vs. ML |
-| `structural_ml_sweep.py` | Parameter-Sweep über 8 Zielgrößen (Pareto: Accuracy vs. Synapsen), Baseline vs. ML |
 | `structural_ml_metatrain.py` | **Meta-Training** eines layout-invarianten Scorers über mehrere Architekturen + Zero-shot-Test auf ungesehenen Layouts |
-| `structural_ml_metascorer_compare.py` | Faire Vergleich: Meta-Scorer (zero-shot) vs. Baseline auf denselben Zielgrößen |
 | `mnist_mlp.ipynb` | Referenz-MLP (784→256→128→64→10) |
 | `models/neuron_scorer_meta.pt` | Der trainierte, layout-invariante Meta-Scorer |
+| `scorer_training_curve.png` | Verlauf des Meta-Scorer-Trainings (Loss) |
 | `PROJECT_REPORT.md` | Projekt-Audit / aktueller Stand |
 
-Ergebnis-Plots: `sweep_result.png`, `zero_shot_result.png`, `scorer_training_curve.png`, `sweep_metascorer_compare.png` (Rohdaten als `.csv`).
+**Benchmarks & Vergleiche** liegen gebündelt in [`Report/Benchmarks/`](Report/Benchmarks/README_BENCHMARKS.md):
+- `structural_ml_sweep.py` — Pareto-Sweep (Accuracy vs. Synapsen), Baseline vs. ML
+- `structural_ml_metascorer_compare.py` — Meta-Scorer (zero-shot) vs. Baseline auf denselben Zielgrößen
+- `structural_ml_compact_benchmark.py` — **Laufzeit-Benchmark**: Masken-Pruning vs. physisches Kompaktieren auf GPU **und CPU**; zeigt, dass Kompaktieren (v. a. auf CPU/ESP32-nah ~1.86x) echte Laufzeit spart, Masken-Pruning nicht
 
 ## Ergebnisse (Kurzfassung)
 
@@ -42,6 +44,12 @@ Ergebnis-Plots: `sweep_result.png`, `zero_shot_result.png`, `scorer_training_cur
 ```bash
 # Meta-Scorer trainieren (5 Train-Layouts, 1500 Epochen) + Zero-shot-Test
 python structural_ml_metatrain.py
+
+# Benchmarks & Vergleiche (siehe Report/Benchmarks/README_BENCHMARKS.md)
+cd Report/Benchmarks
+
+# Speedup-Benchmark: Masken- vs. Kompaktier-Pruning auf GPU + CPU
+python structural_ml_compact_benchmark.py --devices cuda cpu --csv benchmark_compact_GPU_vs_CPU_raw.csv
 
 # Pareto-Sweep über 8 Zielgrößen
 python structural_ml_sweep.py

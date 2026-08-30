@@ -55,10 +55,18 @@ train_ds = mt.train_ds
 test_ds = mt.test_ds
 print(f"Device: {device}", flush=True)
 
-# Der Meta-Scorer wird geladen (optional vorab prozess-weit genutzt)
+# Der Meta-Scorer wird geladen (optional vorab prozess-weit genutzt).
+# Sucht zuerst relativ; faellt auf den Original-Pfad in /Code/models/ zurueck,
+# damit das Skript auch aus Report/Benchmarks heraus lauffaehig bleibt.
 def load_meta_scorer(path="models/neuron_scorer_meta.pt"):
+    import os
+    candidates = [path,
+                  os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "models", "neuron_scorer_meta.pt"),
+                  r"D:\Dynamic Neural Networt (DNN)\Code\models\neuron_scorer_meta.pt"]
+    resolved = next((p for p in candidates if os.path.exists(p)), candidates[0])
     scorer = mt.NeuronScorer(n_feat=6).to(device)
-    scorer.load_state_dict(torch.load(path, map_location=device, weights_only=True))
+    scorer.load_state_dict(torch.load(resolved, map_location=device, weights_only=True))
     scorer.eval()
     return scorer
 
