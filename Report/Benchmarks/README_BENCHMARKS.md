@@ -18,6 +18,7 @@ Dynamic-Neural-Network-Projekt (Struktur-Learning via ML-Controller auf MNIST).
 | `structural_ml_metascorer_compare.py` | **Gleicher-Ziel-Vergleich**: Trainierter, layout-invarianter **Meta-Scorer (zero-shot)** gegen das Fallback-Pruning (mittlere Aktivierung) auf denselben 8 Zielgrößen. Produziert Plot + CSV. |
 | `structural_ml_sweep.py` | **Pareto-Sweep**: Baseline vs. ML-Controller über 8 Zielgrößen; Pareto-Front Accuracy vs. Synapsen. Zeigt, wo ML das Pruning besser kontrolliert. |
 | `structural_ml_trainvssmall_benchmark.py` | **"Trainieren & Prunen" vs. "Direkt klein trainieren"**: Vergleicht ein auf `[256,128,64]` trainiertes und physisch auf `[96,48,24]` kompaktiertes Netz gegen ein von Anfang an gleich großes `784→96→48→24→10` Netz. Beide enden bei identischer Größe (81.264 Synapsen). |
+| `structural_ml_ml_budget_pruning.py` | **ML entscheidet die Schichtgrößen selbst**: Statt festem Ziel `[96,48,24]` wird nur ein **Synapsen-Budget** (81.264) vorgegeben. Der Meta-Scorer bewertet jedes Neuron, und das System prunt schicht-übergreifend nach Wichtigkeit **und** Synapsen-Kosten (teure frühe Neuronen zuerst), bis das Budget erreicht ist. Die resultierenden Schichtgrößen = das "Verhalten" des ML. |
 
 ### 📊 Ergebnis-Dateien (Rohdaten + Plots)
 
@@ -32,6 +33,8 @@ Dynamic-Neural-Network-Projekt (Struktur-Learning via ML-Controller auf MNIST).
 | `RESULT_zero_shot_metascorer.csv` | Rohdaten zum Zero-shot-Ergebnis (Layout, Accuracy Baseline vs. Meta). |
 | `RESULT_trainvssmall.csv` | Rohdaten des Trainieren&Prunen-vs.-klein-Benchmarks (Acc je Variante, Synapsen). |
 | `RESULT_bild_trainvssmall_acc.png` | Balkendiagramm: Accuracy von VOLL, PRUNE (kompaktiert) und SMALL (gleich groß). |
+| `RESULT_ml_budget_pruning.csv` | Rohdaten des ML-Budget-Prunings (Acc vor/nach, Synapsen, vom ML gewählte Schichtgrößen). |
+| `RESULT_bild_ml_budget_pruning.png` | Verlauf des Synapsen-Abbaus + vom ML gewählte Schichtgrößen (vor/nach). |
 
 ---
 
@@ -108,6 +111,43 @@ mit 6 Epochen trainieren → physisch auf `[96,48,24]` kompaktieren → 6 Epoche
 
 ---
 
+## 🧠 Ergebnis: "ML entscheidet die Schichtgrößen selbst" (Budget-Pruning)
+
+Fragestellung: *"Was passiert, wenn nicht fest vorgegeben wird, wie viele Neuronen
+je Schicht übrig bleiben — sondern nur ein Synapsen-Budget, und das ML selbst
+entscheidet, WELCHE Neuronen in WELCHER Schicht geprunt werden?"*
+
+Regel: Der Meta-Scorer bewertet jedes Neuron (0..1 Wichtigkeit). Geprunt wird iterativ
+das Neuron mit **`prio = (1 − score) × Synapsen-Ersparnis`** — also zuerst die
+**teuren (frühen) und zugleich unwichtigen** Neuronen, weil sie das Budget am
+effizientesten erreichen. Ein Floor pro Schicht (15 %, mind. 8) verhindert den
+Kollaps einer Schicht. Budget = 81.264 Synapsen (≈ −66.5 % von 242.304).
+
+| Seed | VOLL (vorher) | vom ML gewählt (nachher) | Synapsen | Accuracy vorher → nachher |
+|------|---------------|--------------------------|----------|---------------------------|
+| 42   | `[256,128,64]` | `[79,128,64]` | 242 304 → 80 880 (−66.6 %) | 97.38 % → **97.57 %** |
+| 2024 | `[256,128,64]` | `[79,128,64]` | 242 304 → 80 880 (−66.6 %) | 97.57 % → **97.69 %** |
+
+### Interpretation (das "Verhalten" des ML)
+
+- **Beide Seeds wählen identisch `[79,128,64]`** → sehr robuste, konsistente
+  Entscheidung, keine Zufallswahl.
+- Das ML schrumpft **nur die erste (teuerste) Schicht** (256→79) und lässt die
+  hinteren beiden (128, 64) **völlig unberührt**. Jedes Neuron in Schicht 1 spart
+  784+128 = **912 Synapsen**; das ML erkennt, dass die Eingangsschicht stark
+  überdimensioniert ist und am effizientesten zu reduzieren ist, während die
+  späteren Schichten pro Synapse wichtiger sind.
+- Die Accuracy **steigt sogar leicht** (≈ +0.2 pp trotz −66.6 % Synapsen).
+- **Kontrast zur festen Vorgabe `[96,48,24]`:** Dort wurde proportional in allen
+  Schichten geprunt. Das ML-Budget-Pruning findet ein **unausgeglicheneres,
+  kostenoptimiertes** Layout — es konzentriert die Einsparung auf die Eingangsschicht.
+
+> Transparenz-Hinweis: Die Ersparnis-Wichtung (`× Ersparnis`) ist eine bewusste
+> Design-Entscheidung ("kostenbewusstes ML-Pruning"). Ohne diesen Faktor (nur nach
+> Score) würde das Layout eher proportional zu den Originalgrößen ausfallen.
+
+---
+
 ## 🚀 Ausführen
 
 ```bash
@@ -124,6 +164,9 @@ python structural_ml_sweep.py
 
 # Trainieren&Prunen vs. Direkt-klein-trainieren (gleiche Zielgroesse)
 python structural_ml_trainvssmall_benchmark.py 42 2024
+
+# ML entscheidet die Schichtgroessen selbst (Synapsen-Budget statt festem Ziel)
+python structural_ml_ml_budget_pruning.py 42 2024
 ```
 
 > Hinweis: `structural_ml_metascorer_compare.py` lädt den trainierten Meta-Scorer

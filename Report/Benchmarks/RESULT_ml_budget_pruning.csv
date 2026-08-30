@@ -1,0 +1,3 @@
+seed,acc_before,acc_final,syn_before,syn_after,syn_compact,layer1,layer2,layer3
+42,97.38,97.57,242304,80880,80880,79,128,64
+2024,97.57,97.69,242304,80880,80880,79,128,64
