@@ -146,6 +146,32 @@ Kollaps einer Schicht. Budget = 81.264 Synapsen (≈ −66.5 % von 242.304).
 > Design-Entscheidung ("kostenbewusstes ML-Pruning"). Ohne diesen Faktor (nur nach
 > Score) würde das Layout eher proportional zu den Originalgrößen ausfallen.
 
+### Wie ändert sich das ML-Verhalten mit dem Budget? (40.000 Synapsen)
+
+Dasselbe Skript mit aggressiverem Budget `SYN_TARGET = 40000` (~ −83.5 % statt
+−66.5 %):
+
+| Seed | VOLL (vorher) | vom ML gewählt (nachher) | Synapsen | Accuracy vorher → nachher |
+|------|---------------|--------------------------|----------|---------------------------|
+| 42   | `[256,128,64]` | `[38,122,42]` | 242 304 → 39 972 | 97.38 % → **97.24 %** |
+| 2024 | `[256,128,64]` | `[38,113,48]` | 242 304 → 39 990 | 97.57 % → **97.00 %** |
+| Mittel | `[256,128,64]` | `[38,118,45]` | ~40 000 | ≈ 97.1 % |
+
+Interpretation:
+- Bei diesem viel knapperen Budget reicht das Schrumpfen **nur** der
+  Eingangsschicht nicht mehr. Das ML prunt Schicht 1 **bis auf den Floor (38)**
+  und greift nun **zusätzlich auf die späteren Schichten** zurück (Schicht 2 → 118,
+  Schicht 3 → 45).
+- Der Floor-Mechanismus (15 % der Originalgröße, min. 8) verhindert, dass Schicht 1
+  noch weiter kollabiert, und zwingt das ML, die wenigen verbliebenen Synapsen
+  effizient über alle Schichten zu verteilen.
+- Accuracy bleibt trotz −83.5 % Synapsen hoch (≈ 97.1 %): massiv komprimiert, aber
+  nahezu gleich gut.
+- **Fazit für das "Verhalten" des ML:** Das gewählte Layout hängt klar vom Budget ab.
+  Bei moderater Kompression (81k) schrumpft es fast nur die teure erste Schicht,
+  bei starker Kompression (40k) muss es zusätzlich alle Schichten proportionaler
+  beschneiden.
+
 ---
 
 ## 🚀 Ausführen

@@ -3,9 +3,9 @@ ML entscheidet selbst: adaptive Schichtgroessen via Synapsen-Budget
 ===================================================================
 Unterschied zu den bisherigen Benchmarks:
   Frueher wurde ein FESTES Ziel vorgegeben (z.B. [96,48,24]).
-  Hier gibt das ML-System nur ein SYNAPSEN-BUDGET vor (81.264, ~ -66.5%)
-  und entscheidet selbst, WELCHE Neuronen und in WELCHER Schicht geprunt
-  werden, bis das Budget erreicht ist.
+  Hier gibt das ML-System nur ein SYNAPSEN-BUDGET vor (SYN_TARGET, einstellbar;
+  z.B. 81.264 ~ -66.5% oder 40.000 ~ -83.5%) und entscheidet selbst, WELCHE
+  Neuronen und in WELCHER Schicht geprunt werden, bis das Budget erreicht ist.
 
 Kernidee:
   - Nicht alle Neuronen sind gleich "teuer":
@@ -61,7 +61,7 @@ test_loader = mt.test_loader
 print(f"Device: {device}", flush=True)
 
 LAYOUT = [256, 128, 64]
-SYN_TARGET = 81264          # Ziel-Synapsen (BUDGET, ~ -66.5% von 242304)
+SYN_TARGET = 40000          # Ziel-Synapsen (BUDGET, ~ -83.5% von 242304)
 SEEDS = [42, 2024]
 WARM = 6                     # Epochen vor dem Pruning (voll trainiert)
 FINETUNE = 6                 # Epochen nach dem Kompaktieren
