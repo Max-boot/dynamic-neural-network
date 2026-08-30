@@ -17,6 +17,7 @@ Dynamic-Neural-Network-Projekt (Struktur-Learning via ML-Controller auf MNIST).
 | `structural_ml_compact_benchmark.py` | **Laufzeit-Benchmark**: Vergleicht Masken-Pruning (Aktivierungen nullen, Matrizen bleiben voll) gegen **physisches Kompaktieren** (Matrizen wirklich schrumpfen). Misst die Forward-Zeit je Batch auf **GPU und CPU**, plus Accuracy und Synapsen-Zahl. Beweis, dass Masken-Pruning keine Laufzeit spart, Kompaktieren aber auf CPU schon. |
 | `structural_ml_metascorer_compare.py` | **Gleicher-Ziel-Vergleich**: Trainierter, layout-invarianter **Meta-Scorer (zero-shot)** gegen das Fallback-Pruning (mittlere Aktivierung) auf denselben 8 Zielgrößen. Produziert Plot + CSV. |
 | `structural_ml_sweep.py` | **Pareto-Sweep**: Baseline vs. ML-Controller über 8 Zielgrößen; Pareto-Front Accuracy vs. Synapsen. Zeigt, wo ML das Pruning besser kontrolliert. |
+| `structural_ml_trainvssmall_benchmark.py` | **"Trainieren & Prunen" vs. "Direkt klein trainieren"**: Vergleicht ein auf `[256,128,64]` trainiertes und physisch auf `[96,48,24]` kompaktiertes Netz gegen ein von Anfang an gleich großes `784→96→48→24→10` Netz. Beide enden bei identischer Größe (81.264 Synapsen). |
 
 ### 📊 Ergebnis-Dateien (Rohdaten + Plots)
 
@@ -29,6 +30,8 @@ Dynamic-Neural-Network-Projekt (Struktur-Learning via ML-Controller auf MNIST).
 | `RESULT_bild_zero_shot_metascorer.png` | Zero-shot-Ergebnis des Meta-Scorers auf ungesehenen Layouts. |
 | `RESULT_sweep_metascorer_compare.csv` | Rohdaten zum Meta-Scorer-Vergleich (Zielgrößen, Accuracy Baseline vs. Meta). |
 | `RESULT_zero_shot_metascorer.csv` | Rohdaten zum Zero-shot-Ergebnis (Layout, Accuracy Baseline vs. Meta). |
+| `RESULT_trainvssmall.csv` | Rohdaten des Trainieren&Prunen-vs.-klein-Benchmarks (Acc je Variante, Synapsen). |
+| `RESULT_bild_trainvssmall_acc.png` | Balkendiagramm: Accuracy von VOLL, PRUNE (kompaktiert) und SMALL (gleich groß). |
 
 ---
 
@@ -74,6 +77,37 @@ dominiert die Matrizen und schrumpft beim Neuronen-Pruning nicht).
 
 ---
 
+## 🎯 Ergebnis: "Trainieren & physisch Prunen" vs. "Direkt klein trainieren"
+
+Fragestellung: *"Ist es besser, das volle Netz zu trainieren und dann physisch zu
+kompaktieren, oder von Anfang an ein gleich großes schlankes Netz zu trainieren?"*
+
+Messbedingungen: MNIST, Seeds `[42, 2024]` (Mittelwert). „PRUNE“ = `784→256→128→64→10`
+mit 6 Epochen trainieren → physisch auf `[96,48,24]` kompaktieren → 6 Epochen Fine-Tune.
+„SMALL“ = `784→96→48→24→10` direkt mit 12 Epochen trainieren (gleiche Trainingssumme).
+„VOLL“ = `784→256→128→64→10` mit 12 Epochen als Referenz.
+
+| Variante | Architektur am Ende | Acc (%) | Syn/MACs |
+|----------|---------------------|---------|----------|
+| **VOLL**  | `784→256→128→64→10` | 98.04 | 242 304 |
+| **PRUNE** | `784→96→48→24→10` (kompaktiert) | **97.83** | **81 264** |
+| **SMALL** | `784→96→48→24→10` (direkt) | 97.11 | **81 264** |
+
+### Interpretation
+
+- **PRUNE und SMALL enden bei identischer Größe** (81.264 Synapsen, −66.5 % vs. VOLL).
+- **PRUNE schlägt SMALL um +0.71 pp** (97.83 % vs. 97.11 %): Das auf dem vollen Netz
+  trainierte und danach kompaktierte Netz ist genauer als ein von Anfang an gleich
+  großes Netz — das Vortraining auf der größeren Architektur verleiht einen Vorteil.
+- Gegenüber VOLL verliert PRUNE nur **−0.21 pp**, spart aber **66.5 % Synapsen** —
+  ein sehr gutes Verhältnis aus Genauigkeit und Größe.
+- **Fazit für dein ESP32-Szenario:** Der geplante Ablauf (auf dem PC vortrainieren →
+  physisch kompaktieren → Forward-Pass auf dem Board) ist nicht nur machbar, sondern
+  liefert sogar ein etwas besseres Modell als eine direkt klein trainierte Alternative —
+  bei gleichem Speicher- und Rechenbudget.
+
+---
+
 ## 🚀 Ausführen
 
 ```bash
@@ -87,6 +121,9 @@ python structural_ml_metascorer_compare.py
 
 # Pareto-Sweep Baseline vs. ML-Controller
 python structural_ml_sweep.py
+
+# Trainieren&Prunen vs. Direkt-klein-trainieren (gleiche Zielgroesse)
+python structural_ml_trainvssmall_benchmark.py 42 2024
 ```
 
 > Hinweis: `structural_ml_metascorer_compare.py` lädt den trainierten Meta-Scorer

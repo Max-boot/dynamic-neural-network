@@ -28,6 +28,7 @@ Kernidee: Statt das Neuronennetz nur anhand von Heuristiken (z. B. mittlere Akti
 - `structural_ml_sweep.py` — Pareto-Sweep (Accuracy vs. Synapsen), Baseline vs. ML
 - `structural_ml_metascorer_compare.py` — Meta-Scorer (zero-shot) vs. Baseline auf denselben Zielgrößen
 - `structural_ml_compact_benchmark.py` — **Laufzeit-Benchmark**: Masken-Pruning vs. physisches Kompaktieren auf GPU **und CPU**; zeigt, dass Kompaktieren (v. a. auf CPU/ESP32-nah ~1.86x) echte Laufzeit spart, Masken-Pruning nicht
+- `structural_ml_trainvssmall_benchmark.py` — **Vortrainieren & physisch Prunen** (`784→256→128→64→10` → `[96,48,24]`) vs. direkt gleich groß trainieren (`784→96→48→24→10`); PRUNE schlägt SMALL um ~+0.7 pp bei identischer Größe (81.264 Synapsen)
 
 ## Ergebnisse (Kurzfassung)
 
