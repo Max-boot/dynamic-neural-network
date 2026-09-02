@@ -30,6 +30,7 @@ Kernidee: Statt das Neuronennetz nur anhand von Heuristiken (z. B. mittlere Akti
 - `structural_ml_compact_benchmark.py` — **Laufzeit-Benchmark**: Masken-Pruning vs. physisches Kompaktieren auf GPU **und CPU**; zeigt, dass Kompaktieren (v. a. auf CPU/ESP32-nah ~1.86x) echte Laufzeit spart, Masken-Pruning nicht
 - `structural_ml_trainvssmall_benchmark.py` — **Vortrainieren & physisch Prunen** (`784→256→128→64→10` → `[96,48,24]`) vs. direkt gleich groß trainieren (`784→96→48→24→10`); PRUNE schlägt SMALL um ~+0.7 pp bei identischer Größe (81.264 Synapsen)
 - `structural_ml_ml_budget_pruning.py` — **ML entscheidet die Schichtgrößen selbst**: nur ein Synapsen-Budget (81.264) ist vorgegeben; der Meta-Scorer + Synapsen-Kosten bestimmen, welche Neuronen/schichten geprunt werden. Ergebnis: überraschend robust `[79,128,64]` (nur die teure erste Schicht wird reduziert, acc steigt sogar leicht)
+- `structural_ml_prune_methods_compare.py` — **Wichtigkeits-Metrik-Vergleich** (Budget 40k): `ML-Score×Ersparnis` vs. `ML-Score×√Ersparnis` vs. `L1-Norm`. Ergebnis: einfache **L1-Norm schlägt den trainierten Scorer** (Δ −0.09 vs. −0.77 pp) — der Scorer liefert nur relativen Rang pro Schicht, L1 liefert absolute globale Wichtigkeit
 
 ## Ergebnisse (Kurzfassung)
 

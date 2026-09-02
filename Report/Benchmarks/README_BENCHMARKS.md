@@ -19,6 +19,7 @@ Dynamic-Neural-Network-Projekt (Struktur-Learning via ML-Controller auf MNIST).
 | `structural_ml_sweep.py` | **Pareto-Sweep**: Baseline vs. ML-Controller über 8 Zielgrößen; Pareto-Front Accuracy vs. Synapsen. Zeigt, wo ML das Pruning besser kontrolliert. |
 | `structural_ml_trainvssmall_benchmark.py` | **"Trainieren & Prunen" vs. "Direkt klein trainieren"**: Vergleicht ein auf `[256,128,64]` trainiertes und physisch auf `[96,48,24]` kompaktiertes Netz gegen ein von Anfang an gleich großes `784→96→48→24→10` Netz. Beide enden bei identischer Größe (81.264 Synapsen). |
 | `structural_ml_ml_budget_pruning.py` | **ML entscheidet die Schichtgrößen selbst**: Statt festem Ziel `[96,48,24]` wird nur ein **Synapsen-Budget** (81.264) vorgegeben. Der Meta-Scorer bewertet jedes Neuron, und das System prunt schicht-übergreifend nach Wichtigkeit **und** Synapsen-Kosten (teure frühe Neuronen zuerst), bis das Budget erreicht ist. Die resultierenden Schichtgrößen = das "Verhalten" des ML. |
+| `structural_ml_prune_methods_compare.py` | **Vergleich der Wichtigkeits-Metriken (gleiches Budget 40k)**: `ML-Score × Ersparnis` vs. `ML-Score × √Ersparnis` vs. `L1-Norm` (TinyML-Standard). Zeigt: L1-Norm schlägt den trainierten Scorer deutlich. |
 
 ### 📊 Ergebnis-Dateien (Rohdaten + Plots)
 
@@ -35,6 +36,8 @@ Dynamic-Neural-Network-Projekt (Struktur-Learning via ML-Controller auf MNIST).
 | `RESULT_bild_trainvssmall_acc.png` | Balkendiagramm: Accuracy von VOLL, PRUNE (kompaktiert) und SMALL (gleich groß). |
 | `RESULT_ml_budget_pruning.csv` | Rohdaten des ML-Budget-Prunings (Acc vor/nach, Synapsen, vom ML gewählte Schichtgrößen). |
 | `RESULT_bild_ml_budget_pruning.png` | Verlauf des Synapsen-Abbaus + vom ML gewählte Schichtgrößen (vor/nach). |
+| `RESULT_prune_methods_compare.csv` | Rohdaten des Wichtigkeits-Metrik-Vergleichs (Acc je Methode/Seed, Synapsen, Schichtgrößen). |
+| `RESULT_bild_prune_methods.png` | Balkendiagramm: Acc der drei Prune-Methoden (ML×s, ML×√s, L1) nach Budget-Pruning. |
 
 ---
 
@@ -174,6 +177,42 @@ Interpretation:
 
 ---
 
+## 📊 Vergleich der Wichtigkeits-Metriken (Budget 40.000)
+
+Drei Methoden, **identische Bedingungen** (gleiches Netz `[256,128,64]`, Budget
+40.000, gleicher Floor, gleiche Seeds 42/2024, gleiche Warm-/Fine-Tune-Epochen).
+Nur die *Wichtigkeits-Metrik* unterscheidet sich — alle prunen greedy bis ans Budget:
+`prio = (1 − score) × sav^p`:
+
+| Methode | save-Potenz | Synapsen | Acc voll | Acc nach | Delta |
+|---|---|---|---|---|---|
+| A: ML-Score × Ersparnis | 1 | 39 892 | 97.47 % | 96.69 % | **−0.78** |
+| B: ML-Score × √Ersparnis | 1/2 | 39 835 | 97.47 % | 96.72 % | **−0.76** |
+| C: **L1-Norm** × Ersparnis | 1 | 39 900 | 97.47 % | **97.38 %** | **−0.09** |
+
+### Interpretation
+
+- **L1-Norm (TinyML-Standard) schlägt den trainierten Meta-Scorer deutlich**
+  (−0.09 pp statt ~−0.77 pp Verlust). Bei Seed 42 übertrifft L1 sogar das
+  ungedruckte Netz (97.44 % vs. 97.32 %).
+- **√Ersparnis bringt praktisch nichts** (−0.76 vs. −0.78) — der Ersparnis-Bias ist
+  nicht die Ursache des Accuracy-Verlusts der Score-Methoden.
+- **Warum gewinnt L1?** Der Meta-Scorer ist *layout-invariant* trainiert und liefert
+  die Wichtigkeit als **Rang innerhalb einer Schicht** (relativ zu den
+  Schicht-Kameraden). Er vergleicht Schicht A **nicht absolut** gegen Schicht B.
+  Die **L1-Norm ist ein absolutes, globales** Maß über alle Schichten (reale
+  Gewichtsmagnitude). Beim aggressiven 40k-Budget zählt die *absolute* Wichtigkeit —
+  und da ist die absolute L1-Norm dem relativen Rang-Score überlegen.
+- L1 wählt fast immer `[38,128,38]` (Schicht 1 und 3 stark, Schicht 2 voll erhalten),
+  während die Score-Methoden anders über Schichten verteilen.
+
+> Einordnung: Der komplexe (trainierte, RL- etc.) Pruning-Ansatz ist hier NICHT
+> besser als die einfache L1-Norm. Für MCU-/Edge-Deployment (wo die Industrie
+> ohnehin auf L1-Magnitude setzt) ist die einfache Metrik bei starkem Budget die
+> robustere Wahl.
+
+---
+
 ## 🚀 Ausführen
 
 ```bash
@@ -193,6 +232,9 @@ python structural_ml_trainvssmall_benchmark.py 42 2024
 
 # ML entscheidet die Schichtgroessen selbst (Synapsen-Budget statt festem Ziel)
 python structural_ml_ml_budget_pruning.py 42 2024
+
+# Vergleich der Wichtigkeits-Metriken: ML-Score x s  vs  ML-Score x sqrt(s)  vs  L1-Norm
+python structural_ml_prune_methods_compare.py
 ```
 
 > Hinweis: `structural_ml_metascorer_compare.py` lädt den trainierten Meta-Scorer
