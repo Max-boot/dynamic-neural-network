@@ -38,6 +38,18 @@ Kernidee: Statt das Neuronennetz nur anhand von Heuristiken (z. B. mittlere Akti
 - **Meta-Training (layout-invariant):** Ein trainierter Scorer generalisiert Zero-shot auf ungesehene Layouts (`[128,128,64]`, `[160,80]`, `[64,64,64,32]`) und übertrifft dort konsistent das Fallback-Pruning.
 - **Gleicher-Ziel-Vergleich:** Der Zero-shot-Meta-Scorer gewinnt bei 6 von 7 Prune-Zielgrößen, am deutlichsten bei kleinen Zielen (bis +0.45 pp).
 
+## Pipeline-Erweiterung (Objekterkennung, 5 Stufen)
+
+Neben dem Struktur-Lernen enthält das Repo eine **mehrstufige TinyML-Objekterkennungs-Pipeline**
+(Conv+ANFIS-Saliency → Decision-Tree-Gating → BNN MC-Dropout + Box-Head), ausgeführt auf
+synthetischen 128x128-Szenen mit MNIST-Ziffern. Kernresultat: **~20× höhere Precision,
+~19× weniger Forward-Pässe und ~2,4× bessere Ziffern-Klassifikation** gegenüber der
+Kachel-für-Kachel-Baseline.
+
+- `Dynamic_NN_Pipeline.ipynb` — reproduzierbarer Komplett-Ablauf (Modell-Load, Eval, Plots)
+- `pipeline/` — Quellmodule (Stufe 1–5) + trainierte Checkpoints
+- `Report/Pipeline_5Stufen/README_PIPELINE.md` — ausführlicher Ergebnisbericht
+
 ## Setup
 
 - Python 3.12, PyTorch mit CUDA (z. B. `cu126`), torchvision, numpy, matplotlib.
