@@ -42,9 +42,9 @@ Kernidee: Statt das Neuronennetz nur anhand von Heuristiken (z. B. mittlere Akti
 
 Neben dem Struktur-Lernen enthält das Repo eine **mehrstufige TinyML-Objekterkennungs-Pipeline**
 (Conv+ANFIS-Saliency → Decision-Tree-Gating → BNN MC-Dropout + Box-Head), ausgeführt auf
-synthetischen 128x128-Szenen mit MNIST-Ziffern. Kernresultat: **~20× höhere Precision,
-~19× weniger Forward-Pässe und ~2,4× bessere Ziffern-Klassifikation** gegenüber der
-Kachel-für-Kachel-Baseline.
+synthetischen 128x128-Szenen mit MNIST-Ziffern. Kernresultat: **~22× höhere Precision,
+~19× weniger Forward-Pässe und ~1,9× bessere Ziffern-Klassifikation** gegenüber der
+Kachel-für-Kachel-Baseline (Klassifikator seit Ablation: 0.79 vs. 0.41 Acc auf Detektionen).
 
 - `Dynamic_NN_Pipeline.ipynb` — reproduzierbarer Komplett-Ablauf (Modell-Load, Eval, Plots)
 - `pipeline/` — Quellmodule (Stufe 1–5) + trainierte Checkpoints

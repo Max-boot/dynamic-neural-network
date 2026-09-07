@@ -40,6 +40,7 @@ MODELS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
 MC_S = 8
 REGION_THR = 0.5
+BNN_C1, BNN_C2, BNN_HID = 40, 80, 192
 
 
 def _crop_tensor(patch):
@@ -223,7 +224,7 @@ def main():
     saliency.load_state_dict(torch.load(
         os.path.join(MODELS, "conv_anfis_saliency.pt"),
         map_location="cpu", weights_only=False)["model"])
-    bnn = BNN(n_class=11, box_head=True, c1=32, c2=64, hid=128)
+    bnn = BNN(n_class=11, box_head=True, c1=BNN_C1, c2=BNN_C2, hid=BNN_HID)
     bnn.load_state_dict(torch.load(
         os.path.join(MODELS, "bnn_mc_box.pt"),
         map_location="cpu", weights_only=False)["model"])

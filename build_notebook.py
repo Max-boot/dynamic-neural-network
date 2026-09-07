@@ -230,12 +230,17 @@ code(
 md([
     "## Stufe 4+5: BNN mit MC-Dropout + Box-Head\n",
     "\n",
-    "Das BNN (Conv-MLP 32->64, Hidden 128, 11 Klassen: 0-9 + Hintergrund) bekommt\n",
+    "Das BNN (Conv-MLP 40->80, Hidden 192, 0.79M Parameter, 11 Klassen: 0-9 + Hintergrund) bekommt\n",
     "Regionen-Crops (bilinear auf 28x28). Ein paralleler Box-Head regressiert aus dem\n",
     "gleichen Feature-Vektor die digitale Box `(cx, cy, w, h)` im Crop. Trainiert\n",
     "wird multitask (CE + Smooth-L1), Klassen gewichtet gegen die Hintergrund-Mehrheit.\n",
     "Unsicherheit: Monte-Carlo-Dropout (S Inferenz-Passes) -> mu und sigma2 der\n",
-    "Softmax-Wahrscheinlichkeiten erlauben Abstention.\n"
+    "Softmax-Wahrscheinlichkeiten erlauben Abstention.\n",
+    "\n",
+    "Verbesserung (digit_acc 0.399 -> 0.460, val_acc 0.549 -> 0.573): mehr Trainings-Crops\n",
+    "(Fenster x10, Kachel x5, 20k Clutter) + mehr Kapazitaet + 70 Epochen. Als Ablation\n",
+    "verworfen: Backbone-Pretraining auf sauberem MNIST (0.534) und geometrische\n",
+    "Rotation/Zoom-Augmentation (0.504) schaedigten beide die verrauschte Verteilung.\n"
 ])
 
 code(
@@ -243,14 +248,14 @@ code(
     "from bnn_data import build_bnn_datasets\n"
     "from torch.utils.data import DataLoader\n"
     "\n"
-    "bnn = BNN(n_class=11, dropout=0.3, box_head=True, c1=32, c2=64, hid=128)\n"
+    "bnn = BNN(n_class=11, dropout=0.3, box_head=True, c1=40, c2=80, hid=192)\n"
     "if RETRAIN:\n"
     "    ds_tr, ds_te = build_bnn_datasets(seed=42, use_cluttered=True,\n"
-    "                                      max_pos_window=8, max_pos_tile=4,\n"
-    "                                      neg_per_img_train=4, neg_per_img_test=4,\n"
-    "                                      n_cluttered=16000)\n"
+    "                                      max_pos_window=10, max_pos_tile=5,\n"
+    "                                      neg_per_img_train=5, neg_per_img_test=4,\n"
+    "                                      n_cluttered=20000)\n"
     "    tr_ = DataLoader(ds_tr, 256, True); te_ = DataLoader(ds_te, 512, False)\n"
-    "    losses, accs = train_bnn(bnn, tr_, te_, epochs=45, device=DEVICE)\n"
+    "    losses, accs, daccs = train_bnn(bnn, tr_, te_, epochs=70, device=DEVICE)\n"
     "    torch.save({'model': bnn.state_dict()}, os.path.join(MODELS, 'bnn_mc_box.pt'))\n"
     "else:\n"
     "    sd = torch.load(os.path.join(MODELS, 'bnn_mc_box.pt'),\n"
@@ -323,13 +328,16 @@ md([
     "\n",
     "- Stufe 1+2 (Conv+ANFIS) erreichen auf Tile-Ebene **AUROC 0.990 / AP 0.987**\n",
     "  und filtern in ~27 MC-Forwards statt 512 der Kacheln-fuer-Kacheln-Baseline.\n",
-    "- Die Pipeline erreicht eine **~20x hoehere Detektions-Pracision** als die\n",
-    "  Baseline (0.64 vs 0.03) und eine hoehere Ziffern-Klassifikationsrate (0.76 vs 0.34).\n",
+    "- Die Pipeline erreicht eine **~22x hoehere Detektions-Pracision** als die\n",
+    "  Baseline (0.69 vs 0.03) und eine hoehere Ziffern-Klassifikationsrate (0.79 vs 0.41),\n",
+    "  bei ~19x weniger Forward-Paessen. Klassifikator-Verbesserung per Ablation:\n",
+    "  Kapazitaet + mehr Crops + 70 Epochen (digit_acc 0.399 -> 0.460); MNIST-Pretrain\n",
+    "  und Rotation/Zoom-Augmentation wurden als schaedlich verworfen (0.534/0.504).\n",
     "- MC-Dropout erlaubt sinnvolles **Abstention**: Mit steigender Confidence wird\n",
     "  die Kandidat-Korrektheit granular steuerbar.\n",
     "- Grenzen (ehrlich berichtet): 8-19px kleine Ziffern auf Rauschhintergrund sind\n",
     "  am unteren Rand dessen, was ein 28x28-Crop unterscheiden kann -> harte untere\n",
-    "  Erkennbarkeitsgrenze; präzise 14px-Boxen sind bei IoU>=0.5 eine grosse Huerde.\n"
+    "  Erkennbarkeitsgrenze; praezise 14px-Boxen sind bei IoU>=0.5 eine grosse Huerde.\n"
 ])
 
 with open(OUT, "w", encoding="utf-8") as f:

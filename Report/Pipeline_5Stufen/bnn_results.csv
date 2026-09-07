@@ -1,0 +1,4 @@
+metric,value
+final_val_acc,0.5734
+final_digit_acc,0.4601
+n_params,785247

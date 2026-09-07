@@ -126,7 +126,8 @@ def train_bnn(model, loader, val_loader, epochs=20, lr=1e-3, device="cuda",
     """
     Multitask-Training: CE (Klassen, gewichtet gegen BG) + SmoothL1 (Box).
     Datensatz liefert (x, y_cls, y_box) pro Sample; fuer BG-Klassen ist die
-    Box ignoriert (mask). Liefert (train_loss, val_acc, val_box_ok_fraction).
+    Box ignoriert (mask). Liefert (train_loss, val_acc, val_digit_acc)
+    - val_digit_acc beschraenkt sich auf die Ziffern-Klassen 0-9 (ohne BG).
     """
     model.to(device)
     # Klassen-Gewichte aus Trainingsverteilung
@@ -142,7 +143,7 @@ def train_bnn(model, loader, val_loader, epochs=20, lr=1e-3, device="cuda",
     weights = torch.tensor(w, dtype=torch.float32, device=device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.StepLR(opt, step_size=7, gamma=0.5)
-    tr_losses, val_accs = [], []
+    tr_losses, val_accs, val_daccs = [], [], []
     for ep in range(epochs):
         model.train()
         tot_l, nb = 0.0, 0
@@ -164,10 +165,12 @@ def train_bnn(model, loader, val_loader, epochs=20, lr=1e-3, device="cuda",
             nb += xb.shape[0]
         sched.step()
         tr_losses.append(tot_l / nb)
-        # Val: Acc + Box-Trefferquote auf Test-Negativen mit "wenig Abweichung"
+        # Val: Acc + Digit-Acc (nur 0-9) + Box-Trefferquote
         model.eval()
         acc = 0.0
+        dacc = 0.0
         nv = 0
+        ndig = 0
         nBox = 0
         boxHit = 0
         with torch.no_grad():
@@ -177,6 +180,10 @@ def train_bnn(model, loader, val_loader, epochs=20, lr=1e-3, device="cuda",
                 pred = logits.argmax(1)
                 acc += (pred == yb).sum().item()
                 nv += xb.shape[0]
+                dig = yb < 10
+                if dig.any():
+                    dacc += (pred[dig] == yb[dig]).sum().item()
+                    ndig += dig.sum().item()
                 mask = yb < 10
                 if mask.any():
                     m = mask.nonzero(as_tuple=False).view(-1)
@@ -190,8 +197,11 @@ def train_bnn(model, loader, val_loader, epochs=20, lr=1e-3, device="cuda",
                     boxHit += ok.sum().item()
                     nBox += mask.sum().item()
         v = acc / nv
+        dv = dacc / max(1, ndig)
         val_accs.append(v)
+        val_daccs.append(dv)
         if (ep + 1) % 5 == 0:
             print(f"  ep {ep+1:02d}/{epochs} loss={tr_losses[-1]:.4f} "
-                  f"val_acc={v:.4f} box_hit={boxHit/max(1,nBox):.3f}")
-    return tr_losses, val_accs
+                  f"val_acc={v:.4f} digit_acc={dv:.4f} "
+                  f"box_hit={boxHit/max(1,nBox):.3f}")
+    return tr_losses, val_accs, val_daccs

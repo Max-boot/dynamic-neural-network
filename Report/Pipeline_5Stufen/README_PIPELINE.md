@@ -16,7 +16,7 @@ Szene 128x128
    │             (Ablation; von ANFIS-Saliency überholt)       (~gering)
    │
    └─ Stufe 4+5: BNN mit MC-Dropout + Box-Head
-                 "Was ist es (0-9|Hintergrund) und wo genau?"  (422.479 Param.)
+                 "Was ist es (0-9|Hintergrund) und wo genau?"  (785.247 Param.)
                  Regionen-Crop 28x28 → Klasse + Bounding-Box (cx,cy,w,h)
 ```
 
@@ -37,7 +37,7 @@ Ziffern-Labels aus dem Pool, seit der Label-Fixierung konsistent).
 |---|---|---|---|
 | Conv+ANFIS | `conv_anfis_saliency.pt` | 902 | 40 Ep., Adam lr 1e–3, BCEWithLogits + pos_weight (~2.1) |
 | Region-Tree | `region_tree.pkl` | ~500 Blätter | DecisionTree max_depth=8, min_samples_leaf=4 |
-| BNN+Box-Head | `bnn_mc_box.pt` | 422.479 | 45 Ep., AdamW, CE (gewichtete Klassen) + Smooth-L1 (Box) |
+| BNN+Box-Head | `bnn_mc_box.pt` | 785.247 | 70 Ep., AdamW lr 1e–3, CE (gewichtete Klassen) + Smooth-L1 (Box) |
 
 ## Ergebnisse (Test, 1000 Szenen)
 
@@ -63,22 +63,50 @@ Extraktionspfad (Confidenzgatter p≥0.6):
 
 | Methode | Bilder mit ≥1 Detektion | Precision | Recall | Klasse (0-9) Acc | Forward-Pässe/Bild |
 |---|---|---|---|---|---|
-| **Pipeline (Conv+ANFIS→Regionen→BNN)** | 0.130 | **0.617** | 0.018 | **0.768** | **27** |
-| Baseline (alle 64 Kacheln einzeln) | 0.718 | 0.031 | 0.159 | 0.325 | 512 |
+| **Pipeline (Conv+ANFIS→Regionen→BNN)** | 0.251 | **0.691** | 0.037 | **0.789** | **27** |
+| Baseline (alle 64 Kacheln einzeln) | 0.738 | 0.031 | 0.161 | 0.409 | 512 |
 
-→ **Kernresultat:** Die Kaskade ist ~20× präziser, ~19× effizienter (Forward-Pässe)
-und ~2,4× genauer in der Ziffern-Klassifikation als die naive Kachel-für-Kachel-Variante.
+→ **Kernresultat:** Die Kaskade ist ~22× präziser, ~19× effizienter (Forward-Pässe)
+und ~1,9× genauer in der Ziffern-Klassifikation als die naive Kachel-für-Kachel-Variante.
 Der Preis: geringere Recall-Abdeckung (Saliency findet nur die salientesten Objekte).
 
-### Lokalisierungs-Ablation (IoU-Sweep, Pipeline)
+### Klassifikations-Verbesserung (BNN)
+
+Ziel war die bislang schwächste Stufe: Ziffern 0-9 in verrauschten 28x28-Crops
+einzeln zu klassifizieren. Per Ablation wurden vier Trainings-/Architekturpfade
+auf **demselben festen Val-Crop-Set (seed 42, 15.992 Crops)** verglichen:
+
+| Konfiguration | val_acc | digit_acc (nur 0-9) | box_hit |
+|---|---|---|---|
+| Alt-Version (32→64→128, 45 Ep., 85k Crops) | 0.549 | 0.399 | 0.609 |
+| + Backbone-Pretrain auf sauberem MNIST | 0.534 | 0.379 | 0.650 |
+| + Rotation/Zoom/Brightness-Augmentation | 0.504 | 0.342 | 0.634 |
+| **Final: c1=40→c2=80→hid=192, 70 Ep., 105k Crops** | **0.594** | **0.459** | **0.661** |
+
+*(Zum Vergleich: Im etwas anderen Val-Split des Trainingsskripts — 18.987 Crops —
+liest der finale Checkpoint 0.573 / 0.460 / 0.636; `bnn_results.csv`.)*
+
+→ **Gewinner:** mehr Trainings-Crops (Fenster×10 + Kachel×5 + 20k Clutter statt
+16k) + moderat mehr Kapazität (0.79M statt 0.42M Params, weiterhin explizit
+MCU-tauglich klein) + längeres Training. Digit-Acc +6.1pp, nur 0.4pp Box-Verlust.
+
+→ **Verworfen (offene negative Resultate):** Ein Backbone-Pretraining auf
+`sauberem` MNIST *verschlechtert* die Acc auf der verrauschten Scene-Verteilung
+(-1.5..-4.5pp): Die sauberen Ziffern-Features übertragen nicht auf Clutter-Crops
+(Windowing-Jitter ±8px, 24-48px-Fenster, BG-Klassen-Dominanz). Auch eine
+Rotation/Zoom-Augmentation schadet (-4pp), weil bereits 14px-Ziffern nach der
+Transformation nicht mehr unterscheidbar sind — die wirkungsvolle Diversität
+kommt aus zusätzlichen *echten* Window-Crops, nicht aus geometrischen Verzerrungen.
+
+### Lokalisierungs-Ablation (IoU-Sweep, Pipeline, neues BNN)
 
 | IoU≥ | Precision | Recall |
 |---|---|---|
-| 0.2 | 0.967 | 0.026 |
-| 0.3 | 0.907 | 0.024 |
-| 0.4 | 0.809 | 0.022 |
-| 0.5 | 0.615 | 0.016 |
-| 0.6 | 0.371 | 0.010 |
+| 0.2 | 0.946 | 0.051 |
+| 0.3 | 0.902 | 0.048 |
+| 0.4 | 0.822 | 0.044 |
+| 0.5 | 0.678 | 0.036 |
+| 0.6 | 0.421 | 0.023 |
 
 → Bei den sehr kleinen Objekten (Median ~14px in 128px) ist IoU≥0.5 eine große
 Hürde: Der ±2px-genaue Box-Sitz steckt in der Lokalisierungsgenauigkeit fest.
@@ -102,8 +130,9 @@ gegen unbrauchbare Falsch-Positiv-Raten.
 ## Ehrliche Einordnung
 
 - Mit 8–19px großen Ziffern auf Rausch-Hintergrund sind 28x28-Crops am unteren
-  Rand des Machbaren — die Klassifikationsrate (0.77 bei akzeptierten Detektionen)
-  ist die physikalische Grenze dieser Auflösung, nicht ein Trainingsartefakt.
+  Rand des Machbaren — die Klassifikationsrate (0.79 bei akzeptierten Detektionen,
+  digits-only 0.46 auf dem Val-Crop-Set) ist die physikalische Grenze dieser
+  Auflösung, nicht ein Trainingsartefakt.
 - Der Decision Tree bringt auf Test-Daten kein Vorteil ggü. der ANFIS-Saliency
   (zu grobe Über-Segmentierung) und wird daher als Ablation geführt.
 - ESP32-Perspektive: ANFIS (klein, differenzierbar) + Tree als billiger
