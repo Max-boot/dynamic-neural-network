@@ -62,6 +62,12 @@ def pool2(x):
     return x.reshape(B, C, H // 2, 2, W // 2, 2).max(axis=(3, 5))
 
 
+def decode_box(raw):
+    return numpy.array([1.0 / (1.0 + numpy.exp(-raw[0])),
+                        1.0 / (1.0 + numpy.exp(-raw[1])),
+                        numpy.exp(raw[2]), numpy.exp(raw[3])])
+
+
 def fold_bn(w, b, bn):
     g = bn.weight.detach().numpy()
     s = 1.0 / numpy.sqrt(bn.running_var.numpy() + bn.eps)
@@ -163,10 +169,13 @@ def main():
     for t in range(16):
         crop = rng.random((28, 28)).astype(numpy.float32)
         with torch.no_grad():
-            t_mu, _t_s2, t_bmu, _t_bs2 = bnn.predict_mc_box(
-                torch.from_numpy(crop[None, None]), S=1)
-            t_logits = t_mu.numpy()[0]
-            t_box = t_bmu.numpy()[0]
+            # Deterministische Referenz: eval()-Forward (kein MC-Dropout),
+            # identisch zu dem, was der ESP32 in float ausfuehrt.
+            t_logits, t_boxr = bnn(torch.from_numpy(crop[None, None]))
+            t_logits = t_logits.numpy()[0]
+            el = numpy.exp(t_logits - t_logits.max())
+            t_logits = el / el.sum()
+            t_box = decode_box(t_boxr.numpy()[0])
         f1 = conv2d_same(crop[None, None], b1w, b1b)
         p1 = pool2(f1)
         f2 = conv2d_same(p1, b2w, b2b)

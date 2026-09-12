@@ -41,8 +41,14 @@ def _near_any(box, boxes, margin=6):
 
 
 def _window_samples(imgs, boxes, labels, rng, max_per_image,
-                    win_range=(24, 48), offset=8):
-    """Fenster-Crops um Ziffern; gibt (crop28, cls, box_target_abs) zurueck."""
+                    win_range=(24, 48), offset=8, max_foreign=3):
+    """Fenster-Crops um Ziffern; gibt (crop28, cls, box_target_abs) zurueck.
+
+    max_foreign begrenzt die Ueberfuellung: Benachbarte GT-Ziffern, die das
+    Fenster (anteilig) ueberlappen, werden mitgezaehlt. Ein Sample wird
+    verworfen, wenn mehr als max_foreign fremde Ziffern im Fenster liegen
+    (Ziel: 1-4 Ziffern pro Crop statt bis zu ~9 bei dicht gepackten Szenen).
+    """
     xs, ys, bs = [], [], []
     n_img = imgs.shape[0]
     for n in range(n_img):
@@ -64,6 +70,18 @@ def _window_samples(imgs, boxes, labels, rng, max_per_image,
             wy0 = min(wy0, 128 - ws)
             wx1 = wx0 + ws
             wy1 = wy0 + ws
+            # Ueberfuellung pruefen: fremde GT-Ziffern im Fenster
+            foreign = 0
+            for m in ks:
+                if m == k:
+                    continue
+                b = boxes[n, m]
+                ix = max(0, min(b[2], wx1) - max(b[0], wx0))
+                iy = max(0, min(b[3], wy1) - max(b[1], wy0))
+                if ix > 0 and iy > 0:
+                    foreign += 1
+            if foreign > max_foreign:
+                continue
             patch = imgs[n, wy0:wy1, wx0:wx1]
             if patch.shape[0] < 6 or patch.shape[1] < 6:
                 continue
@@ -154,22 +172,27 @@ def _normalize_boxes(items, n):
     return out
 
 
-def build_bnn_datasets(seed=42, max_pos_window=3, max_pos_tile=3,
+def build_bnn_datasets(seed=42, base=None, max_pos_window=3, max_pos_tile=3,
                        neg_per_img_train=6, neg_per_img_test=6,
-                       use_cluttered=True, n_cluttered=8000):
+                       use_cluttered=True, n_cluttered=8000,
+                       max_foreign=3):
     """
     Baut Train/Test-Tensordatasets (x, y_cls, y_box) fuer das BNN multitask.
+    base: optionaler Scene-Datenbank-Ordner (z. B. SVHN-Szenen);
+          None = Standard scene_dataset.
     """
     rng = numpy.random.default_rng(seed)
-    tr = load_scene_split("train")
-    te = load_scene_split("test")
+    tr = load_scene_split("train", base=base)
+    te = load_scene_split("test", base=base)
 
     tr_wx, tr_wy, tr_wb = _window_samples(
-        tr["images"], tr["boxes"], tr["labels"], rng, max_pos_window)
+        tr["images"], tr["boxes"], tr["labels"], rng, max_pos_window,
+        max_foreign=max_foreign)
     tr_tx, tr_ty, tr_tb = _tile_samples(
         tr["images"], tr["boxes"], tr["labels"], rng, max_pos_tile)
     te_wx, te_wy, te_wb = _window_samples(
-        te["images"], te["boxes"], te["labels"], rng, max_pos_window)
+        te["images"], te["boxes"], te["labels"], rng, max_pos_window,
+        max_foreign=max_foreign)
     te_tx, te_ty, te_tb = _tile_samples(
         te["images"], te["boxes"], te["labels"], rng, max_pos_tile)
 

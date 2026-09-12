@@ -22,3 +22,34 @@ Thumbs.db
 # Diagnose-/Fehler-Logs
 blobio_err.txt
 *_err.txt
+
+# Lokale Entwicklungsumgebung (nicht auf GitHub)
+.vscode/
+.conda/
+
+# Archiv (alte Experimente, lokale Bereinigung)
+_archive/
+
+# Datensätze / Assets (zu gross fürs Repo, werden lokal geladen/erzeugt)
+cluttered_mnist/
+corrupted_mnist/
+dataset_build/
+mnist/
+data/
+Samples/
+scene_dataset/
+scene_dataset_smoke/
+scene_dataset_svhn/
+
+# Git-Working-Copy-Altstand (nach .git-Umzug zu archivieren)
+github-export/
+
+# Trainings-Checkpoints (kommen nicht ins Repo, liegen nur lokal)
+pipeline/models/*.pt
+pipeline/models/*.pkl
+models/*.pt
+
+# Ergebnisse/Ausgaben
+pipeline/results/
+# Debug-/Diagnose-Skripte (Scratch, nicht im Repo)
+pipeline/debug_*.py

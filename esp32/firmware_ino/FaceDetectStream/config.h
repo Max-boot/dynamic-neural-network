@@ -15,11 +15,11 @@
 //   MODE_AP   = 0 : ESP32 joins your existing WiFi (fill STA_SSID / STA_PASS);
 //                   the chosen IP is printed on the serial monitor.
 // ---------------------------------------------------------------------------
-#define WIFI_AP_MODE      1
+#define WIFI_AP_MODE      0
 #define AP_SSID           "ESP32-FaceCam"
 #define AP_PASS           "facecam123"        // >= 8 chars, or "" for open AP
-#define STA_SSID          "your-wifi"
-#define STA_PASS          "your-password"
+#define STA_SSID          "HUA"
+#define STA_PASS          "9927210000"
 #define HTTP_PORT         80
 
 // ---------------------------------------------------------------------------

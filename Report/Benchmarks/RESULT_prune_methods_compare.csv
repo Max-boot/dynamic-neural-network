@@ -1,7 +1,0 @@
-seed,method,label,acc0,acc,syn0,syn,layer1,layer2,layer3
-42,A_ml_x_sav,ML-Score x Ersparnis,97.32,96.69,242304,39900,38,128,38
-42,B_ml_x_sqrt,ML-Score x sqrt(Ersparnis),97.32,96.65,242304,39680,40,99,40
-42,C_l1_x_sav,L1-Norm x Ersparnis,97.32,97.44,242304,39900,38,128,38
-2024,A_ml_x_sav,ML-Score x Ersparnis,97.63,96.7,242304,39884,38,109,50
-2024,B_ml_x_sqrt,ML-Score x sqrt(Ersparnis),97.63,96.78,242304,39990,39,104,47
-2024,C_l1_x_sav,L1-Norm x Ersparnis,97.63,97.32,242304,39900,38,128,38

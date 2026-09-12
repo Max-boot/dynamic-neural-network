@@ -67,18 +67,18 @@ static bool parse_bnn() {
   if (!b) return false;
   g_bnn.raw = b;
   size_t o = 0;                                  // byte offset walker
-  auto F = [&](size_t n) -> const float* { const float* r = (const float*)(b + o); o += n * 4; return r; };
-  g_bnn.b1w  = F(40 * 1 * 3 * 3);   // 360 f  -> off 1440
-  g_bnn.b1b  = F(40);               // off 1600
-  g_bnn.b2w  = F(80 * 40 * 3 * 3);  // 28800 f -> off 116800
-  g_bnn.b2b  = F(80);               // off 117120
-  g_bnn.fc1b = F(192);              // off 117888
-  g_bnn.fc1s = F(192);              // off 118656
+  auto R = [&](size_t n) -> const float* { const float* r = (const float*)(b + o); o += n * 4; return r; };  // NOTE: darf nicht 'F' heissen (Arduino F()-Makro)
+  g_bnn.b1w  = R(360);                // 360 f  -> off 1440
+  g_bnn.b1b  = R(40);                 // off 1600
+  g_bnn.b2w  = R(80 * 40 * 3 * 3);    // 28800 f -> off 116800
+  g_bnn.b2b  = R(80);                 // off 117120
+  g_bnn.fc1b = R(192);                // off 117888
+  g_bnn.fc1s = R(192);                // off 118656
   g_bnn.fc1w8 = (const int8_t*)(b + o); o += 192 * 3920;   // off 871296
-  g_bnn.fc2w = F(2 * 192);          // off 872832
-  g_bnn.fc2b = F(2);                // off 872840
-  g_bnn.fc3w = F(4 * 192);          // off 875912
-  g_bnn.fc3b = F(4);                // off 875928
+  g_bnn.fc2w = R(2 * 192);            // off 872832
+  g_bnn.fc2b = R(2);                  // off 872840
+  g_bnn.fc3w = R(4 * 192);            // off 875912
+  g_bnn.fc3b = R(4);                  // off 875928
   if (o != BNN_BYTES) {
     Serial.printf("[model] BNN parse offset %u != %u\n", (unsigned)o, BNN_BYTES);
     return false;
