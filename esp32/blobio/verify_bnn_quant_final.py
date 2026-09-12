@@ -19,12 +19,15 @@ import sys
 import numpy
 import torch
 
-sys.path.insert(0, r"D:\Dynamic Neural Networt (DNN)\Code\pipeline")
+# Pfade repo-relativ (Skript liegt in esp32/blobio/ -> zwei Ebenen bis Repo-Wurzel)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(os.path.dirname(_HERE))
+sys.path.insert(0, os.path.join(_ROOT, "pipeline"))
 from bnn import BNN
 from stage12 import ConvANFISSaliency
 
-MODELS = r"D:\Dynamic Neural Networt (DNN)\Code\pipeline\models"
-OUT = r"D:\Dynamic Neural Networt (DNN)\Code\esp32\models"
+MODELS = os.path.join(_ROOT, "pipeline", "models")
+OUT = os.path.join(_ROOT, "esp32", "models")
 
 F32 = 4
 I8 = 1
@@ -158,10 +161,12 @@ def main():
     print(f"BNN geparst: {r2.o}/{len(bb)}")
 
     fc1w_t = bnn.fc1.weight.detach().numpy().astype(numpy.float64)
-    scale = numpy.where(fc1w_t.max(axis=1, keepdims=True) != 0,
-                        fc1w_t.max(axis=1, keepdims=True) / 127.0,
-                        1e-12)
-    w8_ref = numpy.rint(fc1w_t / scale).astype(numpy.int8)
+    # Symmetrische int8-Quantisierung: Betrags-Maximum je Zeile + Saettigung.
+    # (Frueher wurde das vorzeichenbehaftete max verwendet -> int8-wrap bei
+    #  Zeilen mit negativem Spitzenwert. Siehe export_esp32_face.py.)
+    amax = numpy.max(numpy.abs(fc1w_t), axis=1, keepdims=True)
+    scale = numpy.where(amax > 0.0, amax / 127.0, 1.0)
+    w8_ref = numpy.clip(numpy.rint(fc1w_t / scale), -127, 127).astype(numpy.int8)
     blobs_match_int8 = numpy.array_equal(fc1w8, w8_ref)
     scale_match = numpy.allclose(fc1_bs, scale.reshape(-1), atol=1e-6)
     bias_match = numpy.allclose(fc1_bb, bnn.fc1.bias.detach().numpy(),

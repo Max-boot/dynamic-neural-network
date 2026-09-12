@@ -13,12 +13,15 @@ import sys
 import numpy
 import torch
 
-sys.path.insert(0, r"D:\Dynamic Neural Networt (DNN)\Code\pipeline")
+# Pfade repo-relativ (Skript liegt in esp32/blobio/ -> zwei Ebenen bis Repo-Wurzel)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(os.path.dirname(_HERE))
+sys.path.insert(0, os.path.join(_ROOT, "pipeline"))
 from stage12 import ConvANFISSaliency
 from bnn import BNN
 
-MODELS = r"D:\Dynamic Neural Networt (DNN)\Code\pipeline\models"
-OUT = r"D:\Dynamic Neural Networt (DNN)\Code\esp32\models"
+MODELS = os.path.join(_ROOT, "pipeline", "models")
+OUT = os.path.join(_ROOT, "esp32", "models")
 
 F32 = 4
 I8S = 1
@@ -146,10 +149,12 @@ def main():
     maxd1 = maxd2 = 0.0
     hits = 0
     fc1w_ref = bnn.fc1.weight.detach().numpy().astype(numpy.float64)
-    iscale = numpy.where(fc1w_ref.max(axis=1, keepdims=True) != 0,
-                         fc1w_ref.max(axis=1, keepdims=True) / 127.0,
-                         1e-12)
-    w8_ref = numpy.rint(fc1w_ref / iscale).astype(numpy.int8)
+    # Symmetrische int8-Quantisierung: Betrags-Maximum je Zeile + Saettigung.
+    # (Frueher wurde das vorzeichenbehaftete max verwendet -> int8-wrap bei
+    #  Zeilen mit negativem Spitzenwert. Siehe export_esp32_face.py.)
+    amax = numpy.max(numpy.abs(fc1w_ref), axis=1, keepdims=True)
+    iscale = numpy.where(amax > 0.0, amax / 127.0, 1.0)
+    w8_ref = numpy.clip(numpy.rint(fc1w_ref / iscale), -127, 127).astype(numpy.int8)
     int8_exact = numpy.array_equal(fc1w8, w8_ref)
     maxd_q = numpy.abs(fc1w8.astype(numpy.float64) -
                        w8_ref.astype(numpy.float64)).max() if not int8_exact else 0.0

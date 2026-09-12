@@ -9,13 +9,16 @@ import sys
 import numpy
 import torch
 
-sys.path.insert(0, r"D:\Dynamic Neural Networt (DNN)\Code\pipeline")
+# Pfade repo-relativ (Skript liegt in esp32/blobio/ -> zwei Ebenen bis Repo-Wurzel)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(os.path.dirname(_HERE))
+sys.path.insert(0, os.path.join(_ROOT, "pipeline"))
 from bnn import BNN
 
 F32 = 4
 I8S = 1
 
-BLOB = r"D:\Dynamic Neural Networt (DNN)\Code\esp32\models\face_bnn.bin"
+BLOB = os.path.join(_ROOT, "esp32", "models", "face_bnn.bin")
 
 
 class Rd:
@@ -43,7 +46,7 @@ def main():
 
     bnn = BNN(n_class=2, box_head=True, c1=40, c2=80, hid=192)
     bnn.load_state_dict(torch.load(
-        r"D:\Dynamic Neural Networt (DNN)\Code\pipeline\models\bnn_mc_box_face.pt",
+        os.path.join(_ROOT, "pipeline", "models", "bnn_mc_box_face.pt"),
         map_location="cpu", weights_only=False)["model"])
     bnn.eval()
     w = bnn.fc1.weight.detach().numpy().astype(numpy.float64)
