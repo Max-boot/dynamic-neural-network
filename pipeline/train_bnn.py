@@ -76,6 +76,19 @@ def main():
         w.writerow(["final_val_acc", f"{accs[-1]:.4f}"])
         w.writerow(["final_digit_acc", f"{daccs[-1]:.4f}"])
         w.writerow(["n_params", sum(p.numel() for p in model.parameters())])
+
+    # Nach dem Training: 10 zufaellige Bilder durch die volle Pipeline jagen
+    from evaluate_pipeline import export_detection_samples
+    from stage12 import ConvANFISSaliency
+    from data_common import load_scene_split
+    saliency = ConvANFISSaliency()
+    saliency.load_state_dict(torch.load(
+        os.path.join(MODELS, "conv_anfis_saliency.pt"),
+        map_location="cpu", weights_only=False)["model"])
+    te = load_scene_split("test")
+    export_detection_samples(saliency, model, te["images"], te["boxes"],
+                             te["labels"], device=dev, out_dir=RESULTS,
+                             tag="detections_bnn_trained")
     print("Fertig.")
 
 

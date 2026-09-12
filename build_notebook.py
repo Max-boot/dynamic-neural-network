@@ -266,6 +266,36 @@ code(
 )
 
 md([
+    "### Beispiel-Detektionen nach dem Training\n",
+    "\n",
+    "Direkt nach dem Trainingslauf werden **10 zufaellige** Test-Szenen gezogen, die\n",
+    "Pipeline laeuft darauf (Saliency -> hybrid2-Fenster -> BNN + Box-Head) und die\n",
+    "Bounding-Boxen erscheinen **Inline im Notebook** (gruen = GT, rot = Detektion\n",
+    "mit Klasse + Konfidenz). Jede Ausfuehrung waehlt andere Szenen.\n"
+])
+
+code(
+    "import evaluate_pipeline as E\n"
+    "from IPython.display import display\n"
+    "\n"
+    "def show_detection_samples(n=10, gate=None, title='Detektionen (zufaellig)'):\n"
+    "    if gate is None:\n"
+    "        gate = 0.2 if os.path.basename(SCENE_DIR).startswith('scene_dataset_svhn') else 0.5\n"
+    "    figs = E.sample_detection_figures(saliency, bnn, te['images'], te['boxes'], te['labels'],\n"
+    "                                      device=DEVICE, n=n, gate=gate)\n"
+    "    print(f'{title}: {len(figs)} zufaellige Szenen')\n"
+    "    for f in figs:\n"
+    "        f.suptitle(title)\n"
+    "        display(f)\n"
+    "        plt.close(f)\n"
+    "\n"
+    "if RETRAIN:\n"
+    "    show_detection_samples(title='10 zufaellige Szenen - nach dem Training')\n"
+    "else:\n"
+    "    print('RETRAIN=False -> keine frischen Trainings-Detektionen (Tab laeuft sp\u00e4ter sowieso).')\n"
+)
+
+md([
     "## End-to-End-Evaluation\n",
     "\n",
     "Ablauf je Bild: Conv+ANFIS (8x8 Saliency) -> Regionen (CC >= 0.5) -> BNN-MC\n",
@@ -324,6 +354,18 @@ code(
 )
 
 md([
+    "### Beispiel-Detektionen nach der Messung\n",
+    "\n",
+    "Noch einmal **10 zufaellige** Szenen, diesmal als Abschluss der Evaluations-\n",
+    "Zahlen: die Kaskade laeuft auf frisch gezogenen Bildern und die Boxen werden\n",
+    "wieder direkt im Notebook ausgegeben.\n"
+])
+
+code(
+    "show_detection_samples(title='10 zufaellige Szenen - nach der Messung')\n"
+)
+
+md([
     "## Zusammenfassung\n",
     "\n",
     "- Stufe 1+2 (Conv+ANFIS) erreichen auf Tile-Ebene **AUROC 0.990 / AP 0.987**\n",
@@ -337,7 +379,9 @@ md([
     "  die Kandidat-Korrektheit granular steuerbar.\n",
     "- Grenzen (ehrlich berichtet): 8-19px kleine Ziffern auf Rauschhintergrund sind\n",
     "  am unteren Rand dessen, was ein 28x28-Crop unterscheiden kann -> harte untere\n",
-    "  Erkennbarkeitsgrenze; praezise 14px-Boxen sind bei IoU>=0.5 eine grosse Huerde.\n"
+    "  Erkennbarkeitsgrenze; praezise 14px-Boxen sind bei IoU>=0.5 eine grosse Huerde.\n",
+    "- Die Beispiel-Detektionen (10 zufaellige Szenen nach Training/Messung) zeigen die\n"
+    "  Boxen direkt im Notebook: gruen = GT, rot = Pipeline (Klasse + Konfidenz).\n"
 ])
 
 with open(OUT, "w", encoding="utf-8") as f:

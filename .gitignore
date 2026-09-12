@@ -14,3 +14,11 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# LibreOffice / ODT-Lock-Dateien (nicht einchecken)
+.~lock.*#?*
+#__lock__.*
+
+# Diagnose-/Fehler-Logs
+blobio_err.txt
+*_err.txt

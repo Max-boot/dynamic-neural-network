@@ -1,0 +1,5 @@
+split,auc,ap,recall@prec0.5
+test,0.9737153627193379,0.9516544316752842,0.989423076923077
+
+bnn_final_val_acc,0.4125
+bnn_final_digit_acc,0.2559

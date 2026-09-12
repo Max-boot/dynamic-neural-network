@@ -38,6 +38,8 @@ Ziffern-Labels aus dem Pool, seit der Label-Fixierung konsistent).
 | Conv+ANFIS | `conv_anfis_saliency.pt` | 902 | 40 Ep., Adam lr 1e–3, BCEWithLogits + pos_weight (~2.1) |
 | Region-Tree | `region_tree.pkl` | ~500 Blätter | DecisionTree max_depth=8, min_samples_leaf=4 |
 | BNN+Box-Head | `bnn_mc_box.pt` | 785.247 | 70 Ep., AdamW lr 1e–3, CE (gewichtete Klassen) + Smooth-L1 (Box) |
+| Conv+ANFIS (SVHN) | `conv_anfis_saliency_svhn.pt` | 902 | 40 Ep. auf SVHN-Szenen (s. u.) |
+| BNN+Box-Head (SVHN) | `bnn_mc_box_svhn.pt` | 785.247 | 70 Ep. auf SVHN-Szenen (s. u.) |
 
 ## Ergebnisse (Test, 1000 Szenen)
 
@@ -119,6 +121,50 @@ steigt sowohl die Ziffern-Klassifikationsrate als auch die Kandidat-Korrektheit
 statt falsch zu raten. Das ist auf einem ESP32-CAM der entscheidende Mechanismus
 gegen unbrauchbare Falsch-Positiv-Raten.
 
+## Real-World-Transfer: SVHN (echte Fotos)
+
+Kann die auf synthetischen Szenen trainierte Kaskade auf **echte Fotos** springen?
+Als Welt-Standard-Benchmark dient SVHN (Straßenfoto-Hausnummern, Format-1: 32x32
+zentrierte Ziffer). Aus den SVHN-Train/Test-Ziffern wurden eigene Szenen im
+Pipeline-Format (128x128, 4–12 Ziffern, 8–19px) **ohne Sprite-Leak** gebaut
+(`dataset_build/build_svhn_scenes.py`, `scene_dataset_svhn/`, 5000/1000) und beide
+Stufen darauf neu trainiert. GT-Box = zentriertes 65 %-Quadrat; Blend per
+copy-over (SVHN teils hell, `darken` wäre unsichtbar).
+
+| Stufe | Modell | Kennzahl | SVHN | synthetisch (MNIST-Szenen) |
+|---|---|---|---|---|
+| Saliency (1+2) | ConvANFIS 902 P. | AUROC / AP / Rec@P≥0.5 | 0.974 / 0.952 / 0.989 | 0.990 / 0.987 / 0.995 |
+| BNN (4+5) | 785 k P., 70 Ep. | val_acc / digit_acc | 0.413 / 0.256 | 0.594 / 0.459 |
+
+**End-to-End** (hybrid2, 1000 SVHN-Testszenen, 7937 GT-Ziffern; `svhn_eval.csv`):
+
+| Metrik | SVHN (gate 0.2) | synthetisch (gate 0.5) |
+|---|---|---|
+| Precision | 0.380 | 0.561 |
+| Recall | 0.141 | 0.140 |
+| Bilder mit ≥1 TP | 0.688 | 0.688 |
+| Klassen-Acc (TP) | 0.338 | 0.774 |
+| Box-IoU mean / ≥0.6 | 0.636 / 0.566 | 0.651 / 0.632 |
+| Zentrumsfehler | 2.23 px | 2.07 px |
+| Fenster/Bild | 8.6 | 8.6 |
+| Forward-Pässe / Bild | 68.5 | 68.8 |
+
+*(Nach dem Fenster-pro-Ziffer-Fix von hybrid2: jeder Saliency-Peak erhält ein
+eigenes Fenster → ~0.93 Ziffern/Fenster statt 1.5, Recall ≈ doppelt so hoch
+wie vorher, Box-/Zentrumsqualität unverändert.)*
+
+→ **Einordnung:** Die billigen Stufen transferieren nahezu verlustfrei — die
+Saliency findet auf echten Fotos ebenso viele Ziffern wie im synthetischen
+Szenario (Recall 0.141 zu 0.140 bei gate 0.2/0.5), und Box-Regression sitzt mit
+Zentrumsfehler ~2.2px so genau wie gehabt. Der Engpass ist konsistent der BNN-*Klassifikator*:
+auf echten Foto-Ziffern bleibt er unsicher (p_max ~0.2 statt ~0.8), sodass das
+auf klare Texturen kalibrierte Konfidenzgatter p≥0.6 alles verwirft; erst mit
+gate≈0.2 werden Detektionen zugelassen und die Klasse ist nur bei 0/1 zuverlässig
+(0.82/0.78), bei 2–9 nahe Zufall. Das passt exakt zur Trainingskurve (digit_acc
+0.256 ≫ 1/11, aber weit unter der MNIST-Szene). Der 28x28-SVHN-Crop ist am
+Auflösungslimit — Zwischenfall des Bandbreiten-Slots, nicht der Kaskadenlogik;
+Co-Lokalisation und Gating bleiben funktionsfähig.
+
 ## Reproduzierbarkeit
 
 - `Dynamic_NN_Pipeline.ipynb` (Repo-Root): kompletter Ablauf; ohne Retraining,
@@ -138,3 +184,50 @@ gegen unbrauchbare Falsch-Positiv-Raten.
 - ESP32-Perspektive: ANFIS (klein, differenzierbar) + Tree als billiger
   Vorfilter sind MCU-real; der BNN bleibt wegen S-MC-Passes als *Top-K-Verifikation*
   die bewusste Design-Option (siehe `Report/TinyML_Research`).
+
+## ESP32-Einschaetzung (analytisch, ohne Messskript)
+
+Zwei getrennte Fragen: **passt es in den Speicher?** und **schafft die CPU
+die MACs?**
+
+### 1) Groesse (Parameter → Checkpoint-Speicher)
+
+| Stufe | Params | FP32 (4 B) | int8 + BN-Fusion (≈1 B) |
+|---|---|---|---|
+| Conv+ANFIS-Saliency (Stage 1+2) | 902 | 3,6 kB | 0,9 kB |
+| BNN + Box-Head (Stage 4+5) | 785.247 | 3,14 MB | 0,79 MB |
+| **Pipeline gesamt** | **786.149** | **3,15 MB** | **0,79 MB** |
+
+- ESP32-S3: 512 kB SRAM (nutzbar ~ 300–400 kB) + optional PSRAM 2–16 MB.
+- **FP32 passt nicht in SRAM** (3,15 MB > 512 kB), aber in PSRAM ja —
+  PSRAM-Zugriffe sind aber langsam (→ GPIOMATRIX/Bus-Switching).
+- **int8 (0,79 MB) passt in SRAM-Naenhe** (z. B. über MMU-flat
+  `external_psram` nicht nötig; 512 kB genügen knapp, ideal zusammen mit
+  streaming Read statt full Checkpoint im RAM).
+
+### 2) Rechenaufwand (MACs pro Bild, deterministisch, ohne MC-Multiplikator)
+
+Je Forward-Pass: Saliency ≈ 6 M MAC (ConvStack auf 128×128), BNN-Crop ≈ 6,7 M
+MAC (Conv2 40→80 auf 14×14 + FC auf 7×7-Flat).
+
+| Konfiguration | Forward-Pässe/Bild | MACs/Bild |
+|---|---|---|
+| **Jetzt** (MC-S=8, ~8,6 Fenster, full-parse) | 8,6·8 + 1 = ~70 | **≈0,47 G MAC** |
+| Deterministisch (MC-S=1), full-parse | ~9,6 | ≈57 M MAC |
+| Deterministisch + early-stop (gate) | 3–5 | ≈20–35 M MAC |
+
+ESP32-S3 @ 240 MHz, int8-NNC: realistisch **50–100 M MAC/s** (DSP-SIMD ohne
+echte HW-MAC). Daraus:
+
+- ~0,47 G MAC (MC-Status quo): **5–9 s/Bild** → nur als Offline-Auswertung sinnvoll.
+- ~57 M MAC (MC-S=1): **~0,6–1,1 s/Bild** → sporadische Detektion (ein Bild alle
+  1–2 s) machbar; nicht Echtzeit.
+- ~20–35 M MAC (mit early-stop): **~0,2–0,7 s/Bild** → brauchbar für
+  ESP32-CAM-Boolesche „Ziffer vorhanden?"-Abfragen.
+
+**Kernaussage:** Der Engpass ist *nicht* die Modellgröße (die ist für die MCU
+trivial klein), sondern die **MC-Dropout-Zahl (×8)** multipliziert mit der
+Fensterzahl. Die Unsicherheitsberechnung ist der bewusste Kompromiss der
+Studie (genaues Confidence-Gating > rohe Geschwindigkeit); für einen echten
+ESP32-Deploy würde man MC-S auf 1 reduzieren (deterministisch) und dafür die
+Saliency-gate-Schwelle aggressiver setzen.

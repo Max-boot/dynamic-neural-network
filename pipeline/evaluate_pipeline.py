@@ -75,7 +75,7 @@ def _semantic_scene(imgs, gt_boxes, gt_labels, i):
 
 
 def _detect(bnn, region_patches, device, early_stop=True, conf_thr=0.9,
-            sig_thr=0.05):
+            sig_thr=0.05, gate=0.6):
     """Regionen -> Liste von Detektionen + Anzahl Forward-Paesse."""
     dets = []
     fwd = 0
@@ -88,7 +88,7 @@ def _detect(bnn, region_patches, device, early_stop=True, conf_thr=0.9,
         box = (box[0] + ox, box[1] + oy, box[2] + ox, box[3] + oy)
         if cls == 10 and p_max >= 0.7:
             continue  # sicher Hintergrund -> verwerfen (kein FP-Eintrag)
-        if p_max < 0.6:
+        if p_max < gate:
             continue  # unsichere Kandidaten verwerfen (Confidenzgatter)
         dets.append({"box": box, "cls": cls, "conf": p_max, "sigma2": sig_max})
         if early_stop and cls != 10 and p_max >= conf_thr and sig_max <= sig_thr:
@@ -104,6 +104,517 @@ def _region_patches(img, regs, margin=2):
         x0 = max(0, x0 - margin); y0 = max(0, y0 - margin)
         x1 = min(128, x1 + margin); y1 = min(128, y1 + margin)
         patches.append((img[y0:y1, x0:x1], x0, y0))
+    return patches
+
+
+def _refocus_patches(img, sal, regs, min_size=24, max_size=48):
+    """Refokus-Crops: quadratisches Fenster um das Saliency-Zentrum der Region.
+
+    Statt der rohen Tile-Bounding-Box (in der die Ziffer oft am Rand liegt)
+    wird das Fenster um den saliency-gewichteten Schwerpunkt der Region
+    zentriert -> Ziffer sitzt im Fensterzentrum. Groesse = Region-Ausdehnung,
+    geclampt auf [min_size, max_size] (deckt die Trainings-Fenster 24..48px ab).
+    """
+    patches = []
+    n_tile = 16
+    for r in regs:
+        x0, y0, x1, y1 = r["x0"], r["y0"], r["x1"], r["y1"]
+        i0, j0 = x0 // n_tile, y0 // n_tile
+        i1, j1 = (x1 - 1) // n_tile, (y1 - 1) // n_tile
+        sub = sal[j0:j1 + 1, i0:i1 + 1]
+        wsum = float(sub.sum())
+        if wsum <= 0:
+            continue
+        ys, xs = numpy.indices(sub.shape)
+        cy_t = float((sub * ys).sum() / wsum)
+        cx_t = float((sub * xs).sum() / wsum)
+        cx = x0 + (cx_t + 0.5) * n_tile
+        cy = y0 + (cy_t + 0.5) * n_tile
+        extent = max(x1 - x0, y1 - y0)
+        w = int(min(max(extent, min_size), max_size))
+        xc0 = int(numpy.clip(cx - w / 2, 0, 128 - w))
+        yc0 = int(numpy.clip(cy - w / 2, 0, 128 - w))
+        patches.append((img[yc0:yc0 + w, xc0:xc0 + w], xc0, yc0))
+    return patches
+
+
+def _kmeans_centroids(sal, k, mask=None, rng=None, max_iter=30,
+                      init_centers=None):
+    """Lloyd-k-means auf saliency-gewichteten Kachel-Zentren (8x8 Grid).
+
+    Punkte = Zentren der aktiven Kacheln (gewichtete Position in Pixel),
+    Gewicht = Saliency-Wert. Initialisierung via k-means++ ODER uebergebene
+    Seeds (init_centers, Pixel-Koordinaten, k = len(init_centers)).
+    Leere Cluster werden auf das vom verbleibenden Zentrum entfernteste
+    Seed repariert (statt still verworfen zu werden).
+    Liefert (centers [k,2] in Pixel, extents [k], assign [P], xs [P], ys [P]):
+    assign/xs/ys sind die Lloyd-Zuordnung der aktiven Punkte.
+    """
+    if rng is None:
+        rng = numpy.random.default_rng(42)
+    if mask is None:
+        mask = sal > 0
+    ys, xs = numpy.nonzero(mask)
+    if len(ys) == 0:
+        return [], [], numpy.zeros(0, dtype=int), xs, ys
+    w = sal[ys, xs]
+    if w.sum() <= 0:
+        return [], [], numpy.zeros(0, dtype=int), xs, ys
+    pts = numpy.stack([xs * 16.0 + 8.0, ys * 16.0 + 8.0], axis=1).astype(numpy.float64)
+    wts = w.astype(numpy.float64)
+    if init_centers is not None:
+        k = int(init_centers.shape[0])
+        centers = numpy.asarray(init_centers, dtype=numpy.float64).copy()
+        seeds = centers.copy()
+    else:
+        k = int(max(1, min(k, len(pts))))
+        seeds = None
+        # k-means++ Init
+        centers = numpy.zeros((k, 2))
+        centers[0] = pts[int(numpy.argmax(wts))]
+        for c in range(1, k):
+            mind = numpy.full(len(pts), numpy.inf)
+            for prev in range(c):
+                d2p = ((pts - centers[prev][None, :]) ** 2).sum(1)
+                mind = numpy.minimum(mind, d2p)
+            prob = wts * (mind + 1e-9)
+            if prob.sum() <= 0:
+                centers[c] = pts[c % len(pts)]
+            else:
+                centers[c] = pts[rng.choice(len(pts), p=prob / prob.sum())]
+    # Lloyd-Iteration (gewichtete Zentren)
+    assign = numpy.zeros(len(pts), dtype=int)
+    for _ in range(max_iter):
+        d = ((pts[:, None, :] - centers[None, :, :]) ** 2).sum(2)
+        nassign = numpy.argmin(d, axis=1)
+        for c in range(k):
+            m = nassign == c
+            if m.sum() == 0:
+                if seeds is not None:
+                    # weitestes verfuegbares Seed setzen
+                    others = [j for j in range(k) if (nassign == j).sum() > 0]
+                    if others:
+                        ctrs = centers[others]
+                        ds = ((seeds[:, None, :] - ctrs[None, :, :]) ** 2).sum(2)
+                        centers[c] = seeds[int(numpy.argmax(ds.min(1)))]
+                    else:
+                        centers[c] = seeds[int(numpy.argmax(
+                            ((seeds - centers[0][None, :]) ** 2).sum(1)))]
+                else:
+                    centers[c] = pts[numpy.argmax(((pts - centers[0][None, :]) ** 2).sum(1))]
+            else:
+                centers[c] = (pts[m] * wts[m][:, None]).sum(0) / wts[m].sum()
+        if (nassign == assign).all():
+            break
+        assign = nassign
+    extents = []
+    for c in range(k):
+        m = assign == c
+        if m.sum() == 0:
+            extents.append(0.0)
+            continue
+        extents.append(max((xs[m].max() - xs[m].min() + 1) * 16.0,
+                           (ys[m].max() - ys[m].min() + 1) * 16.0))
+    return centers, extents, assign, xs, ys
+
+
+def _best_square(own_x0, own_y0, own_x1, own_y1, fg_x0, fg_y0, fg_x1, fg_y1,
+                 max_size=48, center_penalty=1.0):
+    """Groesstes grid-aligned Quadrat, das alle eigenen Tiles enthaelt und
+    keine fremde Tile schneidet.
+
+    own_*: 1D-Arrays der eigenen Tile-Kanten (x0/y0/x1/y1)
+    fg_* : 1D-Arrays der fremden Tile-Kanten
+    Rueckgabe (x0, y0, w) oder None, wenn unmoeglich (ueberlappende
+    Cluster) -> dann winziges Quadrat um die eigene BBox-Mitte als Fallback.
+    """
+    # Suchraum: alle grid-aligned Quadrate (x0 in 0..128-16, w in 16..max)
+    # die die eigene BBox umschliessen -> minimale Groesse ist die eigene BBox
+    ob_x0, ob_y0 = int(own_x0.min()), int(own_y0.min())
+    ob_x1, ob_y1 = int(own_x1.max()), int(own_y1.max())
+    ob_w, ob_h = ob_x1 - ob_x0, ob_y1 - ob_y0
+    min_w = max(ob_w, ob_h)
+    best = None
+    for w in range(min_w, max_size + 1, 16):
+        # x0 muss >= ob_x1 - w und <= ob_x0 sein, grid-aligned
+        x0s = numpy.arange(max(0, ob_x1 - w), min(ob_x0, 128 - w) + 1, 16)
+        y0s = numpy.arange(max(0, ob_y1 - w), min(ob_y0, 128 - w) + 1, 16)
+        for x0 in x0s:
+            x1 = x0 + w
+            if x1 > 128:
+                continue
+            for y0 in y0s:
+                y1 = y0 + w
+                if y1 > 128:
+                    continue
+                if ((fg_x0 < x1) & (fg_x1 > x0) &
+                        (fg_y0 < y1) & (fg_y1 > y0)).any():
+                    continue  # schneidet fremde Tile
+                score = -w  # groesstes Quadrat bevorzugt
+                if best is None or score > best[0]:
+                    best = (score, x0, y0, w)
+    if best is not None:
+        return int(best[1]), int(best[2]), int(best[3])
+    # unmoeglich: Fallback = kleinstes Quadrat um eigene BBox (inkl. Fremd)
+    w = min(max(min_w, 16), max_size)
+    cx = (ob_x0 + ob_x1) / 2
+    cy = (ob_y0 + ob_y1) / 2
+    x0 = int(numpy.clip(cx - w / 2, 0, 128 - w))
+    y0 = int(numpy.clip(cy - w / 2, 0, 128 - w))
+    return x0, y0, w
+
+
+def _cluster_squares(sal, centers, assign, xs, ys, consider=None,
+                     min_size=24, max_size=48, imp_thr=REGION_THR,
+                     min_half=8.0):
+    """Fensterquadrate je Cluster (fuer kmeans/hybrid).
+
+    Die "Punkte" sind 16x16-Tiles: Das Quadrat muss eigene wichtige Tiles
+    (saliency >= imp_thr) **vollstaendig** enthalten und darf fremde
+    wichtige Tiles **nicht schneiden**.
+
+    Loesung: suche das groesste grid-aligned Quadrat (Kanten auf dem
+    16px-Raster), das beide Bedingungen gleichzeitig erfuellt (_best_square).
+    Ueberlappende Cluster (eigene und fremde Tiles unvermeidbar vermischt)
+    fallen auf ein Fallback-Quadrat um die eigene BBox zurueck.
+    """
+    if consider is None:
+        consider = numpy.ones_like(assign, dtype=bool)
+    imp = sal >= imp_thr
+    squares = []
+    for c in range(len(centers)):
+        own = consider & (assign == c) & imp[xs, ys]
+        if not own.any():
+            continue
+        own_x0 = xs[own] * 16
+        own_x1 = own_x0 + 16
+        own_y0 = ys[own] * 16
+        own_y1 = own_y0 + 16
+        foreign = consider & (assign != c) & imp[xs, ys]
+        if foreign.any():
+            fg_x0 = xs[foreign] * 16
+            fg_x1 = fg_x0 + 16
+            fg_y0 = ys[foreign] * 16
+            fg_y1 = fg_y0 + 16
+        else:
+            fg_x0 = numpy.array([], dtype=numpy.int64)
+            fg_x1 = numpy.array([], dtype=numpy.int64)
+            fg_y0 = numpy.array([], dtype=numpy.int64)
+            fg_y1 = numpy.array([], dtype=numpy.int64)
+        x0, y0, w = _best_square(own_x0, own_y0, own_x1, own_y1,
+                                 fg_x0, fg_y0, fg_x1, fg_y1,
+                                 max_size=max_size)
+        cx = x0 + w / 2
+        cy = y0 + w / 2
+        squares.append((cx, cy, w / 2, c))
+    return squares
+
+
+def _patches_from_squares(img, squares):
+    """squares: (cx, cy, half, c) -> Crop-Patches (img, x0, y0).
+
+    Fenster kantenexakt: x0 = floor(cx-half), x1 = ceil(cx+half), damit
+    eigene Tiles vollstaendig drin sind und fremde Tiles nur beruehrt
+    werden (Crop wird vom BNN ohnehin auf 28x28 resized).
+    """
+    patches = []
+    for cx, cy, half, _ in squares:
+        x0 = int(numpy.floor(cx - half))
+        y0 = int(numpy.floor(cy - half))
+        x1 = int(numpy.ceil(cx + half))
+        y1 = int(numpy.ceil(cy + half))
+        x0 = int(numpy.clip(x0, 0, 128))
+        y0 = int(numpy.clip(y0, 0, 128))
+        x1 = int(numpy.clip(x1, 0, 128))
+        y1 = int(numpy.clip(y1, 0, 128))
+        if x1 - x0 < 4 or y1 - y0 < 4:
+            continue
+        patches.append((img[y0:y1, x0:x1], x0, y0))
+    return patches
+
+
+def _patches_from_centers(img, centers, extents, min_size=24, max_size=48):
+    """Crop-Fenster um k-means-Zentren (Groesse = Cluster-Ausdehnung, clampt)."""
+    patches = []
+    for (cx, cy), extent in zip(centers, extents):
+        w = int(min(max(extent, min_size), max_size))
+        xc0 = int(numpy.clip(cx - w / 2, 0, 128 - w))
+        yc0 = int(numpy.clip(cy - w / 2, 0, 128 - w))
+        patches.append((img[yc0:yc0 + w, xc0:xc0 + w], xc0, yc0))
+    return patches
+
+
+def _merge_close_clusters(sal, centers, assign, xs, ys,
+                          merge_gap=0, imp_thr=REGION_THR):
+    """Verschraenkte/Split-Cluster konsolidieren (Ziffer auf 2 Cluster).
+
+    Zwei Cluster werden gemergt, wenn sich die Bounding-Boxen ihrer
+    wichtigen Tiles UEBERLAPPEN (merge_gap=0: echte Verschraenkung, eine
+    Ziffer von k-means gesplittet). Benachbarte aber getrennte Ziffern
+    bleiben getrennt. Union-Find, iterativ bis stabil.
+    Liefert (new_centers, new_assign, new_labels).
+    """
+    imp = sal >= imp_thr
+    n = len(centers)
+    parent = list(range(n))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    def bbox(c):
+        m = (assign == c) & imp[xs, ys]
+        if not m.any():
+            return None
+        return (xs[m].min(), ys[m].min(), xs[m].max(), ys[m].max())
+
+    boxes = {c: bbox(c) for c in range(n)}
+    for a in range(n):
+        ba = boxes[a]
+        if ba is None:
+            continue
+        for b in range(a + 1, n):
+            bb = boxes[b]
+            if bb is None:
+                continue
+            dx = max(0, max(ba[0], bb[0]) - min(ba[2], bb[2]))
+            dy = max(0, max(ba[1], bb[1]) - min(ba[3], bb[3]))
+            if dx * 16 <= merge_gap and dy * 16 <= merge_gap:
+                union(a, b)
+
+    n_new = 0
+    new_labels = {}
+    new_assign = numpy.zeros(len(assign), dtype=int)
+    for p in range(len(assign)):
+        r = find(int(assign[p]))
+        c = new_labels.setdefault(r, n_new)
+        if c == n_new:
+            n_new += 1
+        new_assign[p] = c
+    # gewichtete Zentren der Merges
+    ws = sal[xs, ys]
+    new_centers = []
+    for c in range(n_new):
+        m = new_assign == c
+        if m.sum() == 0:
+            new_centers.append(numpy.zeros(2))
+            continue
+        wm = ws[m]
+        if wm.sum() <= 0:
+            new_centers.append(numpy.array([
+                (xs[m] * 16.0 + 8.0).mean(), (ys[m] * 16.0 + 8.0).mean()]))
+        else:
+            new_centers.append(numpy.array([
+                ((xs[m] * 16.0 + 8.0) * wm).sum() / wm.sum(),
+                ((ys[m] * 16.0 + 8.0) * wm).sum() / wm.sum()]))
+    return numpy.asarray(new_centers), new_assign, new_labels
+
+
+def _dedup_squares(sal, squares, iou_thr=0.6, imp_thr=REGION_THR):
+    """Redundante, ueberlappende Fenster entfernen (bei hoher Saliency-Masse).
+
+    Sortiert nach im Fenster enthaltener Saliency-Masse absteigend, NMS mit
+    IoU >= iou_thr: behalte das massenreichste Fenster, loesche ueberlappende.
+    """
+    if len(squares) <= 1:
+        return squares
+    scored = []
+    for (cx, cy, half, c) in squares:
+        x0 = int(numpy.clip(numpy.floor(cx - half), 0, 128))
+        y0 = int(numpy.clip(numpy.floor(cy - half), 0, 128))
+        x1 = int(numpy.clip(numpy.ceil(cx + half), 0, 128))
+        y1 = int(numpy.clip(numpy.ceil(cy + half), 0, 128))
+        wsum = float(sal[y0:y1, x0:x1].sum())
+        scored.append((wsum, cx, cy, half, c))
+    scored.sort(key=lambda s: -s[0])
+    keep = []
+    for s in scored:
+        _, cx, cy, half, c = s
+        x0 = int(numpy.clip(numpy.floor(cx - half), 0, 128))
+        y0 = int(numpy.clip(numpy.floor(cy - half), 0, 128))
+        x1 = int(numpy.clip(numpy.ceil(cx + half), 0, 128))
+        y1 = int(numpy.clip(numpy.ceil(cy + half), 0, 128))
+        dup = False
+        for kx0, ky0, kx1, ky1 in keep:
+            ix = max(0, min(x1, kx1) - max(x0, kx0))
+            iy = max(0, min(y1, ky1) - max(y0, ky0))
+            inter = ix * iy
+            uni = (x1 - x0) * (y1 - y0) + (kx1 - kx0) * (ky1 - ky0) - inter
+            if uni > 0 and inter / uni >= iou_thr:
+                dup = True
+                break
+        if not dup:
+            keep.append((x0, y0, x1, y1))
+            continue
+    # nur behaltene Quadrate zurueckgeben
+    out = []
+    for s in scored:
+        _, cx, cy, half, c = s
+        x0 = int(numpy.clip(numpy.floor(cx - half), 0, 128))
+        y0 = int(numpy.clip(numpy.floor(cy - half), 0, 128))
+        x1 = int(numpy.clip(numpy.ceil(cx + half), 0, 128))
+        y1 = int(numpy.clip(numpy.ceil(cy + half), 0, 128))
+        if (x0, y0, x1, y1) in keep:
+            out.append((cx, cy, half, c))
+    return out
+
+
+def _kmeans_patches(img, sal, mass_per_digit=2.0, max_k=12, rng=None,
+                    min_size=24, max_size=48, merge_gap=0, dedup=True):
+    """Reiner k-means: Cluster auf dem gesamten Saliency-Grid (kein CC).
+
+    k wird je Bild aus der Saliency-Masse geschaetzt:
+    round(masse / Tiles-pro-Ziffer), geclampt auf [1, max_k].
+    Nach dem Lloyd: verschraenkte Cluster (Ziffer auf 2 Cluster gesplittet)
+    werden gemergt; redundante, ueberlappende Fenster dedupliziert (NMS).
+    Quadrate je Cluster: enthalten ALLE wichtigen eigenen Punkte und keine
+    wichtigen Punkte fremder Cluster.
+    """
+    mass = float(sal.sum())
+    if mass <= 0:
+        return []
+    k = int(min(max_k, max(1, round(mass / mass_per_digit))))
+    centers, extents, assign, xs, ys = _kmeans_centroids(sal, k, rng=rng)
+    centers, assign, new_labels = _merge_close_clusters(
+        sal, centers, assign, xs, ys, merge_gap=merge_gap)
+    squares = _cluster_squares(sal, centers, assign, xs, ys,
+                               min_size=min_size, max_size=max_size)
+    if dedup:
+        squares = _dedup_squares(sal, squares)
+    return _patches_from_squares(img, squares)
+
+
+def _hybrid_patches(img, sal, regs, big_extent=32, max_sub=6,
+                    mass_per_digit=1.5, rng=None, min_size=24, max_size=48):
+    """Hybrid: CC-Regionen wie gehabt, aber grosse (verschmolzene) Regionen
+    werden per k-means in Einzel-Ziffern-Subcluster zerlegt.
+    Kleine Regionen -> einzelner Refokus-Crop (wie 'refocus'-Modus).
+    Subcluster-Quadrate: enthalten alle wichtigen eigenen Punkte, keine
+    wichtigen Punkte anderer Subcluster innerhalb derselben Region.
+    """
+    patches = []
+    for r in regs:
+        x0, y0, x1, y1 = r["x0"], r["y0"], r["x1"], r["y1"]
+        extent = max(x1 - x0, y1 - y0)
+        if extent <= big_extent:
+            patches.extend(_refocus_patches(img, sal, [r]))
+            continue
+        i0, j0 = x0 // 16, y0 // 16
+        i1, j1 = (x1 - 1) // 16, (y1 - 1) // 16
+        sub = sal[j0:j1 + 1, i0:i1 + 1]
+        k = int(min(max_sub, max(1, round(float(sub.sum()) / mass_per_digit))))
+        mask = numpy.zeros((8, 8), dtype=bool)
+        mask[j0:j1 + 1, i0:i1 + 1] = sub > 0
+        centers, extents, assign, xs, ys = _kmeans_centroids(sal, k,
+                                                             mask=mask, rng=rng)
+        # consider = Punkte in dieser Region, damit Fremd-Punkte ausserhalb
+        # der Region das Quadrat nicht einschraenken
+        consider = mask[xs, ys]
+        squares = _cluster_squares(sal, centers, assign, xs, ys,
+                                   consider=consider, min_size=min_size,
+                                   max_size=max_size)
+        patches.extend(_patches_from_squares(img, squares))
+    return patches
+
+
+def _saliency_peaks(sal, mask=None, thr=REGION_THR, win=3):
+    """Lokale Saliency-Maxima (Peaks) auf dem 8x8-Grid, nur Kacheln >= thr.
+
+    Nur Kacheln in mask zaehlen (Nachbarschaftswerte ausserhalb mask werden
+    ignoriert). Peaks in winxwin-Nachbarschaft absteigend nach Saliency,
+    Gierig dedupliziert (max. ein Peak pro winxwin-Zelle).
+    Rueckgabe: Liste von (y, x)-Tile-Indizes.
+    """
+    if mask is None:
+        mask = numpy.ones_like(sal, dtype=bool)
+    cand = numpy.argwhere(mask & (sal >= thr))
+    if len(cand) == 0:
+        return []
+    vals = sal[cand[:, 0], cand[:, 1]]
+    order = numpy.argsort(-vals)
+    n = win // 2
+    peaks = []
+    for idx in order:
+        yy, xx = int(cand[idx, 0]), int(cand[idx, 1])
+        v = vals[idx]
+        y0, y1 = max(0, yy - n), min(8, yy + n + 1)
+        x0, x1 = max(0, xx - n), min(8, xx + n + 1)
+        nb = sal[y0:y1, x0:x1].copy()
+        nb[~mask[y0:y1, x0:x1]] = -numpy.inf
+        nb[yy - y0, xx - x0] = -numpy.inf
+        if v < numpy.max(nb):
+            continue
+        if all(abs(yy - py) > n or abs(xx - px) > n for py, px in peaks):
+            peaks.append((yy, xx))
+    return peaks
+
+
+def _hybrid2_patches(img, sal, regs, big_extent=32, min_size=24, max_size=48,
+                     orphan_size=28, peak_win=28, dedup_iou=0.75,
+                     peak_dedup_iou=0.85, rng=None, imp_thr=REGION_THR):
+    """hybrid2: Peak-seeded k-means mit garantierter Fenster-pro-Ziffer.
+
+    Kleine Regionen -> Refokus-Crop (wie hybrid). Grosse Regionen:
+    k = Anzahl lokaler Saliency-Peaks (statt Masse/1.5, kein Deckel),
+    Peaks seeden die k-means-Zentren, leere Cluster werden repariert.
+    Fenster sind auf die Cluster-Schwerpunkte zentriert (keine harte
+    Fremd-Exklusion), Groesse = Cluster-Ausdehnung clampt auf
+    [min_size, max_size].
+
+    Kernpunkt (Fix gegen zu wenige Fenster): JEDER Peak erhaelt
+    garantiert ein eigenes Peak-zentriertes Fenster (peak_win). Cluster-
+    Fenster werden nur noch mit lockerem Schwellwert dedupliziert
+    (dedup_iou), damit benachbarte Ziffern getrennte Fenster behalten;
+    die finalen Peak-Fenster werden nur gegen nahezu identische
+    Duplikate entfernt (peak_dedup_iou). -> ~1 Fenster/Ziffer statt
+    ~1.5 Ziffern/Fenster.
+    """
+    patches = []
+    for r in regs:
+        x0, y0, x1, y1 = r["x0"], r["y0"], r["x1"], r["y1"]
+        extent = max(x1 - x0, y1 - y0)
+        if extent <= big_extent:
+            patches.extend(_refocus_patches(img, sal, [r]))
+            continue
+        i0, j0 = x0 // 16, y0 // 16
+        i1, j1 = (x1 - 1) // 16, (y1 - 1) // 16
+        mask = numpy.zeros((8, 8), dtype=bool)
+        mask[j0:j1 + 1, i0:i1 + 1] = sal[j0:j1 + 1, i0:i1 + 1] > 0
+        peaks = _saliency_peaks(sal, mask=mask, thr=imp_thr)
+        if len(peaks) == 0:
+            patches.extend(_refocus_patches(img, sal, [r]))
+            continue
+        init = numpy.array([[px * 16.0 + 8.0, py * 16.0 + 8.0]
+                            for py, px in peaks], dtype=numpy.float64)
+        centers, extents, assign, xs, ys = _kmeans_centroids(
+            sal, None, mask=mask, rng=rng, init_centers=init)
+        squares = []
+        for c, (cx, cy) in enumerate(centers):
+            m = assign == c
+            if m.sum() == 0:
+                continue
+            e = max((xs[m].max() - xs[m].min() + 1) * 16.0,
+                    (ys[m].max() - ys[m].min() + 1) * 16.0)
+            w = float(min(max(e, min_size), max_size))
+            squares.append((cx, cy, w / 2.0, c))
+        # lockere Konsolidierung: nur grob ueberlappende Fenster entfernen,
+        # benachbarte Ziffern behalten ihre Fenster
+        squares = _dedup_squares(sal, squares, iou_thr=dedup_iou,
+                                 imp_thr=imp_thr)
+        # garantiert ein Fenster je Peak (= je Ziffer)
+        for py, px in peaks:
+            squares.append((px * 16.0 + 8.0, py * 16.0 + 8.0,
+                            peak_win / 2.0, -1.0))
+        squares = _dedup_squares(sal, squares, iou_thr=peak_dedup_iou,
+                                 imp_thr=imp_thr)
+        patches.extend(_patches_from_squares(img, squares))
     return patches
 
 
@@ -129,15 +640,36 @@ def _eval_detections(dets, img, gtb, gtl, gt_idx):
     return tp, fp, cls_ok, cls_n
 
 
+def _patches_for(img, sal, regs, mode="hybrid2"):
+    """Crop-Strategie: 'bbox' | 'refocus' | 'kmeans' | 'hybrid' | 'hybrid2'.
+
+    Standard ist 'hybrid2' (CC-Regionen; grosse verschmolzene Regionen
+    Peak-seedete k-means-Subcluster mit zentrierten Mindest-Fenstern und
+    Waisen-Absicherung, kleine Regionen Refokus). 'hybrid' ist der
+    Vorgaenger mit Quadrat-Ableitung (mass/1.5-k), die uebrigen Modi werden
+    nur noch zu Vergleichs-/Ablationszwecken unterstuetzt.
+    """
+    if mode == "bbox":
+        return _region_patches(img, regs)
+    if mode == "kmeans":
+        return _kmeans_patches(img, sal)
+    if mode == "hybrid":
+        return _hybrid_patches(img, sal, regs)
+    if mode == "hybrid2":
+        return _hybrid2_patches(img, sal, regs)
+    return _refocus_patches(img, sal, regs)  # Default: refocus
+
+
 def evaluate_pipeline(bnn, sal_all, imgs, gtb, gtl, device="cuda",
-                      early_stop=True):
+                      early_stop=True, mode="hybrid2", gate=0.6):
     tp = fp = cls_ok = cls_n = img_tp = 0
     fwd_s = 0.0
     for i in range(imgs.shape[0]):
         img, _, _, gt_idx = _semantic_scene(imgs, gtb, gtl, i)
         regs = _regions_from_saliency(sal_all[i])
-        patches = _region_patches(img, regs)
-        dets, fwd, _ = _detect(bnn, patches, device, early_stop=early_stop)
+        patches = _patches_for(img, sal_all[i], regs, mode)
+        dets, fwd, _ = _detect(bnn, patches, device, early_stop=early_stop,
+                               gate=gate)
         fwd_s += fwd
         t, f, cok, cn = _eval_detections(dets, img, gtb[i], gtl[i], gt_idx)
         tp += t; fp += f; cls_ok += cok; cls_n += cn
@@ -185,13 +717,103 @@ def baseline_tiles(bnn, imgs, gtb, gtl, device="cuda"):
             "mean_fwd": 64 * MC_S}
 
 
-def confidence_curve(bnn, sal_all, imgs, gtb, gtl, device="cuda", n_max=400):
+def _sample_indices(n, size, seed):
+    rng = numpy.random.default_rng(seed)  # seed=None -> zufaellig
+    return rng.choice(size, size=min(n, size), replace=False)
+
+
+def _draw_detection_figure(img, gtb_i, gtl_i, gt_idx, dets, scene_id, mode,
+                           gate, title=""):
+    """Zeichnet 2-Panel: GT-Boxen (gruen) vs. Pipeline-Detektionen (rot)."""
+    fig, axes = plt.subplots(1, 2, figsize=(9, 4.4))
+    for a, t in [(axes[0], f"GT  (Szene {int(scene_id)})"),
+                 (axes[1], f"Pipeline ({mode}, gate={gate})")]:
+        a.imshow(img, cmap="gray", vmin=0, vmax=1)
+        a.set_title(t)
+        a.axis("off")
+    for k in gt_idx:
+        x0, y0, x1, y1 = gtb_i[k]
+        axes[0].add_patch(plt.Rectangle((x0, y0), x1 - x0, y1 - y0,
+                                        fill=False, edgecolor="lime",
+                                        lw=1.2, ls="--"))
+        axes[0].text(x0, max(0, y0 - 1), str(int(gtl_i[k])),
+                     color="lime", fontsize=8)
+    for d in dets:
+        if d["cls"] == 10:
+            continue
+        x0, y0, x1, y1 = d["box"]
+        axes[1].add_patch(plt.Rectangle((x0, y0), x1 - x0, y1 - y0,
+                                        fill=False, edgecolor="red",
+                                        lw=1.4))
+        axes[1].text(x0, max(0, y0 - 1),
+                     f"{d['cls']} {d['conf']:.2f}",
+                     color="red", fontsize=8)
+    if title:
+        fig.suptitle(title)
+    fig.tight_layout()
+    return fig
+
+
+def sample_detection_figures(saliency, bnn, imgs, gtb, gtl, device="cuda",
+                             n=10, seed=None, mode="hybrid2", gate=0.6):
+    """Wie export_detection_samples, liefert aber die Figuren zurueck, statt
+    PNGs zu speichern (fuer die Inline-Anzeige im Notebook)."""
+    rng = numpy.random.default_rng(seed)
+    pick = rng.choice(imgs.shape[0], size=min(n, imgs.shape[0]), replace=False)
+    saliency.to(device).eval()
+    bnn.to(device).eval()
+    figs = []
+    with torch.no_grad():
+        for i in pick:
+            img, gtb_i, gtl_i, gt_idx = _semantic_scene(imgs, gtb, gtl, int(i))
+            X = torch.from_numpy(img[None, None].astype(numpy.float32)).to(device)
+            sal = torch.sigmoid(saliency(X)).cpu().numpy().reshape(8, 8)
+            regs = _regions_from_saliency(sal)
+            patches = _patches_for(img, sal, regs, mode)
+            dets, fwd, _ = _detect(bnn, patches, device, early_stop=False,
+                                   gate=gate)
+            figs.append(_draw_detection_figure(img, gtb_i, gtl_i, gt_idx, dets,
+                                               int(i), mode, gate))
+    return figs
+
+
+def export_detection_samples(saliency, bnn, imgs, gtb, gtl, device="cuda",
+                             n=10, seed=None, mode="hybrid2", gate=0.6,
+                             out_dir=None, tag="samples"):
+    """Pipeline auf n zufaelligen Szenen laufen lassen und Boxen abspeichern.
+
+    Nimmt n zufaellige Bilder aus dem Test-Split, laeuft die volle Kaskade
+    (Saliency -> Regionen -> hybrid2-Fenster -> BNN+Box-Head), zeichnet pro
+    Szene die GT-Boxen (gruen) und die Detektionen (rot, Klasse + Konfidenz)
+    und speichert die PNGs nach out_dir/tag/. Ohne seed ist die Auswahl
+    bei jedem Aufruf zufaellig.
+    """
+    if out_dir is None:
+        out_dir = os.path.join(RESULTS, "samples")
+    save_dir = os.path.join(out_dir, tag)
+    os.makedirs(save_dir, exist_ok=True)
+
+    figs = sample_detection_figures(saliency, bnn, imgs, gtb, gtl, device=device,
+                                    n=n, seed=seed, mode=mode, gate=gate)
+    files = []
+    for fig, i in zip(figs, _sample_indices(n, imgs.shape[0], seed)):
+        fn = os.path.join(save_dir, f"scene_{int(i)}.png")
+        fig.savefig(fn, dpi=140)
+        plt.close(fig)
+        files.append(fn)
+    print(f"[Export] {len(files)} zufaellige Szenen -> {save_dir}")
+    return files
+
+
+def confidence_curve(bnn, sal_all, imgs, gtb, gtl, device="cuda", n_max=400,
+                     mode="hybrid2"):
     """Acc/Koverage-Kurve bei Confidence-Gating (fuer MC-Dropout-Abstention)."""
     rows = []
     for i in range(min(n_max, imgs.shape[0])):
         img, gtb_i, gtl_i, gt_idx = _semantic_scene(imgs, gtb, gtl, i)
         regs = _regions_from_saliency(sal_all[i])
-        for patch, ox, oy in _region_patches(img, regs):
+        patches = _patches_for(img, sal_all[i], regs, mode)
+        for patch, ox, oy in patches:
             if patch.shape[0] < 4 or patch.shape[1] < 4:
                 continue
             cls, p_max, sig_max, box = _bnn_region(bnn, patch, device)
@@ -307,6 +929,11 @@ def main():
     ax[1].grid(alpha=0.3)
     fig.tight_layout()
     fig.savefig(os.path.join(RESULTS, "pipeline_vs_baseline.png"), dpi=150)
+
+    # Nach der Messung: 10 zufaellige Bilder mit Boxen exportieren
+    export_detection_samples(saliency, bnn, imgs, gtb, gtl, device=dev,
+                             out_dir=RESULTS, tag="detections_mnist")
+
     print("Fertig ->", RESULTS)
 
 
