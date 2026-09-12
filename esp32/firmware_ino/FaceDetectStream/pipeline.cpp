@@ -3,6 +3,7 @@
 // ============================================================================
 #include "pipeline.h"
 #include "config.h"
+#include "model.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -113,6 +114,11 @@ void inference_task(void* arg) {
   Detection dets[MAX_DETS];
 
   for (;;) {
+    // Never dereference the model pointers unless the blobs actually loaded:
+    // nn_saliency/nn_bnn read g_sal/g_bnn, which are null when model_load_all
+    // failed (missing/wrong-size blobs) -> LoadProhibited at address 0.
+    if (!nn_model_ready()) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+
     if (!shared_get_scene(scene)) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
 
     nn_saliency(scene, sal);

@@ -1,54 +1,34 @@
 // ============================================================================
-//  model.cpp  -  LittleFS load + PSRAM parse of the two trained blobs.
+//  model.cpp  -  Embedded blob access: the two trained blobs are compiled into
+//  the firmware as PROGMEM arrays (see gen_blob_headers.py / *_bin_data.h), so
+//  no LittleFS upload is needed. The pointers below view into those arrays.
 // ============================================================================
 #include "model.h"
 #include "config.h"
+#include "face_saliency_bin_data.h"
+#include "face_bnn_bin_data.h"
 #include <LittleFS.h>
 
 SaliencyModel g_sal;
 BnnModel      g_bnn;
 
 // ---- helpers ---------------------------------------------------------------
-static uint8_t* read_file_psram(const char* path, size_t expect, size_t* got) {
-  File f = LittleFS.open(path, "r");
-  if (!f) { Serial.printf("[model] open failed: %s\n", path); return nullptr; }
-  size_t sz = f.size();
-  if (expect && sz != expect) {
-    Serial.printf("[model] %s size %u != expected %u\n", path,
-                  (unsigned)sz, (unsigned)expect);
-    f.close();
-    return nullptr;
-  }
-  // 4-byte aligned PSRAM buffer so float* casts at 4-aligned offsets are safe.
-  uint8_t* buf = (uint8_t*)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
-  if (!buf) buf = (uint8_t*)malloc(sz);          // fallback to internal RAM
-  if (!buf) { Serial.printf("[model] alloc %u failed\n", (unsigned)sz); f.close(); return nullptr; }
-  size_t rd = f.read(buf, sz);
-  f.close();
-  if (rd != sz) { Serial.println("[model] short read"); free(buf); return nullptr; }
-  if (got) *got = sz;
-  return buf;
-}
-
 static inline float softplus(float x) { return log1pf(expf(x)); }
 
 // ---- public API ------------------------------------------------------------
 bool storage_begin() {
-  if (LittleFS.begin(false)) return true;       // mount existing FS
-  Serial.println("[model] LittleFS mount failed, formatting...");
-  return LittleFS.begin(true);                  // format then mount
+  // LittleFS still mounted for the (legacy) web upload endpoint even though
+  // the models are now embedded; failures here are non-fatal.
+  if (LittleFS.begin(false)) return true;
+  return LittleFS.begin(true);
 }
 
-bool model_files_present() {
-  return LittleFS.exists(SALIENCY_PATH) && LittleFS.exists(BNN_PATH);
-}
+bool model_files_present() { return true; }  // blobs are baked into the image
 
 static bool parse_saliency() {
-  size_t sz = 0;
-  uint8_t* b = read_file_psram(SALIENCY_PATH, SALIENCY_BYTES, &sz);
-  if (!b) return false;
-  g_sal.raw = b;
-  const float* p = (const float*)b;             // whole blob is float32
+  // PROGMEM array is __attribute__((aligned(4))), so the float* view is safe.
+  const float* p = (const float*)face_saliency_data;
+  g_sal.raw = (const uint8_t*)face_saliency_data;
   g_sal.c1w = p;              p += 8 * 1 * 3 * 3;   // 72
   g_sal.c1b = p;              p += 8;               // 8
   g_sal.c2w = p;              p += 4 * 8 * 3 * 3;   // 288
@@ -57,16 +37,19 @@ static bool parse_saliency() {
   g_sal.logsig = p;           p += 3 * 5;           // 15
   g_sal.P   = p;              p += 125 * 4;         // 500
   for (int i = 0; i < 15; i++) g_sal.sigma[i] = softplus(g_sal.logsig[i]);
-  Serial.println("[model] saliency parsed");
+  if (FACE_SALIENCY_BYTES != SALIENCY_BYTES) {
+    Serial.printf("[model] saliency embedded %u != expect %u\n",
+                  (unsigned)FACE_SALIENCY_BYTES, (unsigned)SALIENCY_BYTES);
+    return false;
+  }
+  Serial.println("[model] saliency parsed (embedded)");
   return true;
 }
 
 static bool parse_bnn() {
-  size_t sz = 0;
-  uint8_t* b = read_file_psram(BNN_PATH, BNN_BYTES, &sz);
-  if (!b) return false;
+  const uint8_t* b = face_bnn_data;          // PROGMEM, 4-aligned
   g_bnn.raw = b;
-  size_t o = 0;                                  // byte offset walker
+  size_t o = 0;                              // byte offset walker
   auto R = [&](size_t n) -> const float* { const float* r = (const float*)(b + o); o += n * 4; return r; };  // NOTE: darf nicht 'F' heissen (Arduino F()-Makro)
   g_bnn.b1w  = R(360);                // 360 f  -> off 1440
   g_bnn.b1b  = R(40);                 // off 1600
@@ -83,27 +66,26 @@ static bool parse_bnn() {
     Serial.printf("[model] BNN parse offset %u != %u\n", (unsigned)o, BNN_BYTES);
     return false;
   }
-  Serial.println("[model] bnn parsed");
+  Serial.println("[model] bnn parsed (embedded)");
   return true;
 }
 
 bool model_load_all() {
-  if (!model_files_present()) {
-    Serial.println("[model] blob(s) missing -- upload via /upload first");
-    return false;
-  }
   return parse_saliency() && parse_bnn();
 }
 
+bool nn_model_ready() {
+  return g_sal.raw != nullptr && g_bnn.raw != nullptr;
+}
+
 int model_store_file(const char* path, const uint8_t* data, size_t len) {
-  File f = LittleFS.open(path, "w");
-  if (!f) return -1;
-  size_t w = f.write(data, len);
-  f.close();
-  return (w == len) ? (int)w : -1;
+  (void)path; (void)data; (void)len;
+  Serial.println("[model] store disabled -- blobs are embedded");
+  return -1;
 }
 
 void model_free_all() {
-  if (g_sal.raw) { free(g_sal.raw); g_sal.raw = nullptr; }
-  if (g_bnn.raw) { free(g_bnn.raw); g_bnn.raw = nullptr; }
+  // Embedded blobs live in PROGMEM/flash: nothing to free.
+  g_sal.raw = nullptr;
+  g_bnn.raw = nullptr;
 }

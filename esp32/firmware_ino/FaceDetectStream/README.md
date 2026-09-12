@@ -44,14 +44,15 @@ Hold **IO0 to GND**, press **RST**, upload. Remove the IO0–GND jumper and pres
 ## 2. Arduino IDE settings
 
 - **Board:** "AI Thinker ESP32-CAM"
-- **Partition Scheme:** "Huge APP (3MB No OTA / 1MB SPIFFS)" — the BNN blob is
-  ~855 KB and needs a large app + a filesystem partition.
+- **Partition Scheme:** "Huge APP (3MB No OTA / 1MB SPIFFS)" — the embedded BNN
+  blob adds ~855 KB to the sketch.
 - **PSRAM:** Enabled
 - **Flash Frequency:** 80 MHz, **Flash Mode:** QIO
 - **Upload Speed:** 115200 (raise later if stable)
 
 Open `esp32/firmware_ino/FaceDetectStream/FaceDetectStream.ino`. All `.h/.cpp`
-in that folder compile as one sketch — keep them together.
+in that folder compile as one sketch — keep them together. The model blobs are
+**already embedded** (see section 4): just flash, no separate upload needed.
 
 ---
 
@@ -71,24 +72,20 @@ To join your own network instead, set `WIFI_AP_MODE 0` and fill `STA_SSID` /
 
 ---
 
-## 4. Upload the model blobs (one time)
+## 4. Model blobs are embedded (no upload needed)
 
-The trained blobs live in `esp32/models/` and are **not** compiled into the
-firmware — they are stored on the on-flash filesystem so the sketch fits. After
-flashing, the serial log will say the model is missing until you upload them.
+The trained blobs (`esp32/models/face_saliency.bin` 3608 B, `face_bnn.bin`
+875928 B) are compiled directly into the firmware as PROGMEM arrays. After
+flashing, the model is **already there** — no LittleFS upload, no reboot dance.
 
-**Option A — script (recommended):**
+If you replace the models, regenerate the embeds before compiling:
+
 ```bash
-cd esp32/tools
-python upload_model.py                       # AP mode, both blobs -> 192.168.4.1
-python upload_model.py --host 192.168.1.42   # STA mode: use the printed IP
+cd esp32/firmware_ino/FaceDetectStream
+python gen_blob_headers.py     # rewrites *_bin_data.h from esp32/models/*.bin
 ```
 
-**Option B — web UI:** open the device page, pick a blob name, choose the file
-from `esp32/models/`, click *Upload*. Do both files.
-
-Then **reboot the ESP32** (press RST or power-cycle). It parses the blobs into
-PSRAM on boot; the status line turns to `model:loaded`.
+Then re-flash the sketch (the sizes in `config.h` must match the new blobs).
 
 ---
 
@@ -143,12 +140,14 @@ box) is also available (`REGION_MODE` in `config.h`).
 | `FaceDetectStream.ino` | setup, dual-core task creation, camera init, scene build, box overlay, JPEG encode |
 | `config.h` | all tunables: WiFi, paths/sizes, thresholds, region mode |
 | `camera_pins.h` | AI-Thinker GPIO map |
-| `model.h/.cpp` | LittleFS mount, blob upload store, PSRAM parse into typed pointers |
+| `model.h/.cpp` | embedded blob access: PROGMEM arrays -> typed pointers into flash |
+| `face_saliency_bin_data.h` | auto-generated embed of `face_saliency.bin` |
+| `face_bnn_bin_data.h` | auto-generated embed of `face_bnn.bin` |
+| `gen_blob_headers.py` | regenerates the `*_bin_data.h` embeds from the blobs |
 | `nn.h/.cpp` | forward pass: saliency (Conv+ANFIS), regions (BFS), windows, int8 BNN + box |
 | `pipeline.h/.cpp` | mutex-guarded shared state + the core-1 inference loop |
-| `web.h/.cpp` | esp_http_server: index, MJPEG stream, upload, status |
+| `web.h/.cpp` | esp_http_server: index, MJPEG stream, status |
 | `../tools/sim_pipeline.py` | NumPy reference the firmware mirrors — use it to calibrate |
-| `../tools/upload_model.py` | push blobs to the device over WiFi |
 | `../models/*.bin` | the trained blobs (`face_saliency.bin` 3608 B, `face_bnn.bin` 875928 B) |
 
 ---

@@ -204,8 +204,14 @@ void setup() {
   web_set_status(g_model_ok, ip.c_str());
   web_begin();
 
-  // Inference on core 1; camera + stream on core 0.
-  xTaskCreatePinnedToCore(inference_task, "infer", 32768, nullptr, 1, nullptr, 1);
+  // Inference on core 1; camera + stream on core 0. The inference task
+  // dereferences the model pointers on the very first frame, so never start
+  // it unless the blobs actually loaded (see pipeline.cpp guard as the
+  // second line of defence).
+  if (g_model_ok)
+    xTaskCreatePinnedToCore(inference_task, "infer", 32768, nullptr, 1, nullptr, 1);
+  else
+    Serial.println("[boot] inference disabled -- model not loaded, upload blobs then reboot");
   xTaskCreatePinnedToCore(camera_task,    "cam",   16384, nullptr, 2, nullptr, 0);
 
   Serial.println("[boot] running");
