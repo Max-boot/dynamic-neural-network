@@ -74,19 +74,24 @@ static bool camera_init() {
 // Mirrors sim_pipeline.load_rgb_scene: center square crop, bilinear resize to
 // SCENE, /255. linspace(0, S-1, SCENE) sampling. Scene layout is channel-major
 // [R][G][B] planes, each [SCENE*SCENE] row-major, matching nn_saliency(C=N_CH).
-// RGB565 -> 0..255 exakte lineare Skalierung (255/31 bzw. 255/63 pro Bit):
+// Die Szene wird vertikal gespiegelt (Kamera kopfüber montiert); Rendering und
+// Detektion arbeiten dann konsistent auf der gespiegelten Szene.
+// RGB565 -> 0..255 exakte lineare Skalierung (255/31 bzw. 255/63 pro Bit).
+// Byte-Reihenfolge der OV2640-RGB565-Frames ist big-endian und matcht
+// fmt2rgb888: p565 = (buf[0]<<8) | buf[1], wobei B die oberen 5 Bit (p>>11),
+// G die mittleren 6 Bit ((p>>5)&0x3F) und R die unteren 5 Bit (p&0x1F) traegt.
+// Ein uint16_t*-Cast wuerde little-endian lesen (charakteristische Farbfraktale).
 static void build_scene(const uint8_t* g8, int W, int H, float* scene) {
-  const uint16_t* g = (const uint16_t*)g8;    // little-endian host: byte0 = LSB
   int S   = W < H ? W : H;                 // square side
   int ox  = (W - S) / 2;
   int oy  = (H - S) / 2;
   float step = (S > 1) ? (float)(S - 1) / (float)(SCENE - 1) : 0.0f;
   for (int j = 0; j < SCENE; j++) {
-    float fy = j * step;
+    // Kamera ist kopfüber montiert: Szene vertikal spiegeln (oben<->unten).
+    // Wiederholte Abtastposition ergibt exakt den gespiegelten Bilinear-Wert.
+    float fy = (float)(S - 1) - j * step;
     int y0 = (int)fy; int y1 = y0 + 1; if (y1 > S - 1) y1 = S - 1;
     float wy = fy - y0;
-    const uint16_t* r0 = g + (oy + y0) * W + ox;
-    const uint16_t* r1 = g + (oy + y1) * W + ox;
     for (int i = 0; i < SCENE; i++) {
       float fx = i * step;
       int x0 = (int)fx; int x1 = x0 + 1; if (x1 > S - 1) x1 = S - 1;
@@ -96,11 +101,11 @@ static void build_scene(const uint8_t* g8, int W, int H, float* scene) {
       for (int q = 0; q < 4; q++) {
         int col = (q & 1) ? x1 : x0;
         int row = (q & 2) ? y1 : y0;
-        const uint16_t* px = (row == y0 ? r0 : r1) + col;
-        uint16_t p565 = *px;
-        float r8 = float((p565 >> 11) & 0x1F) * (255.0f / 31.0f);
+        const uint8_t* px = g8 + ((oy + row) * W + ox + col) * 2;  // 2 B/px
+        uint16_t p565 = (uint16_t)(px[0] << 8) | px[1];   // high byte zuerst
+        float b8 = float((p565 >> 11) & 0x1F) * (255.0f / 31.0f);
         float g8 = float((p565 >> 5)  & 0x3F) * (255.0f / 63.0f);
-        float b8 = float((p565)       & 0x1F) * (255.0f / 31.0f);
+        float r8 = float((p565)       & 0x1F) * (255.0f / 31.0f);
         rgb[0][q] = r8; rgb[1][q] = g8; rgb[2][q] = b8;
       }
       for (int c = 0; c < N_CH; c++) {
