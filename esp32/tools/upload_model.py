@@ -30,7 +30,7 @@ _MODELS = os.path.normpath(os.path.join(_HERE, "..", "models"))
 
 # (local file, device path, expected size) -- sizes are the firmware's sanity check.
 BLOBS = {
-    "saliency": ("face_saliency.bin", "/face_saliency.bin", 4184),
+    "saliency": ("face_saliency.bin", "/face_saliency.bin", 2964),
     "bnn":      ("face_bnn.bin",      "/face_bnn.bin",      878808),
 }
 

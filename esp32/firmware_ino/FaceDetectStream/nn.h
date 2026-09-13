@@ -7,7 +7,7 @@
 #include <Arduino.h>
 #include "config.h"
 
-struct Region  { int x0, y0, x1, y1, tiles; };
+struct Region  { int x0, y0, x1, y1, tiles; float score; };  // score = sum of tile saliency
 struct Window  { int x0, y0, x1, y1; };
 struct Detection { float x0, y0, x1, y1; int cls; float conf; };
 
@@ -18,11 +18,15 @@ bool nn_begin();
 // -> sal[N_TILES] (8x8, row-major), each a sigmoid saliency probability.
 void nn_saliency(const float* scene, float* sal /*[N_TILES]*/);
 
-// Stage 3a: connected components (4-neighbour) of (sal >= REGION_THR).
-// Fills out[] (sorted largest-first), returns region count (<= maxr).
+// Stage 3a: proposal regions from the saliency map. REGION_MODE_ADAPTIVE uses
+// adaptive hysteresis (per-frame T_high/T_low) + valley-based peak splitting, so
+// one big face stays one region while two faces across a valley split. Legacy
+// modes use fixed-threshold (REGION_THR) connected components. Regions are sorted
+// by saliency (strongest first); returns the region count (<= maxr).
 int nn_regions(const float* sal, Region* out, int maxr);
 
-// Stage 3b: regions -> crop windows per REGION_MODE. Returns window count.
+// Stage 3b: regions -> crop windows per REGION_MODE (rectangular & region-sized
+// under REGION_MODE_ADAPTIVE). Returns window count (<= maxw).
 int nn_windows(const float* sal, const Region* regs, int nreg,
                Window* out, int maxw);
 

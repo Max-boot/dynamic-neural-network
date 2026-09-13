@@ -8,11 +8,14 @@ Skript pruefen.
 Kette (ganze Struktur, wie vom Nutzer gefordert):
   Kamera-Preprocessing : RGB565 -> RGB888 -> Center-Crop (quadratisch) ->
                          bilinear 128x128, /255
-  1+2. Conv+ANFIS      : ConvStack(3->8->4) -> TileStats(mean/max/var) ->
-                         Instanz-Norm ueber 64 Kacheln -> ANFIS(125 Regeln) ->
+  1+2. Conv+MLP        : ConvStack(3->8->4) -> per-Kanal TileStats(mean/max/var)
+                         -> Instanz-Norm ueber 64 Kacheln -> MLP(12->16->1) ->
                          Sigmoid  => Saliency 8x8
-  3.   Regionen        : Saliency >= REGION_THR -> Connected Components (4-Nachbar)
-                         -> Crop-Fenster (Modus: hybrid2 | refocus | bbox)
+  3.   Regionen        : Modus "adaptive" (Firmware-Default): adaptive Hysterese
+                         (T_high/T_low aus Kachel-Statistik je Frame) + tal-
+                         basiertes Peak-Splitting -> rechteckige, regiongrosse
+                         Fenster. Legacy: Saliency>=REGION_THR -> Connected
+                         Components (hybrid2 | refocus | bbox).
   4.   BNN je Fenster  : Fenster -> bilinear 28x28 -> conv/pool/int8-FC1 ->
                          Klassen-Logits (softmax) + Box-Head (cx,cy,w,h)
   5.   Box in Bild     : (cx +- w/2)*W0, (cy +- h/2)*H0 + Fenster-Offset;
@@ -59,6 +62,20 @@ REGION_THR = 0.5
 GATE = 0.6
 BG_REJECT_P = 0.7   # cls==BG && p_max>=BG_REJECT_P -> verwerfen
 
+# --- adaptiver Proposer (Modus "adaptive") - 1:1 zu config.h -----------------
+# T_high = clamp(mu + SEED_K*sd, SEED_FLOOR, SEED_CEIL) ; T_low analog mit GROW_*.
+SEED_K = 2.0
+GROW_K = 0.5
+SEED_FLOOR = 0.55
+SEED_CEIL = 0.80
+GROW_FLOOR = 0.40
+PROMINENCE = 0.15    # Peak-Split (Tal/Prominenz): zweiter Peak nur, wenn er
+                     # >= PROMINENCE ueber dem verbindenden Sattel liegt.
+                     # Plateau (Sattel==Peak -> 0) bleibt EIN Peak.
+MARGIN_PCT = 15      # Fenster-Rand in % der Regionseite (Ganzzahl-Mathematik)
+WIN_FLOOR = 24       # Mindest-Fensterseite (px) fuers BNN
+MAX_WINDOWS = 6      # Sicherheits-Deckel fuer BNN-Paesse/Frame (kein Ziel)
+
 
 class _Rd:
     """Sequenzieller Blob-Leser (little-endian, wie der Export sie schreibt)."""
@@ -80,17 +97,19 @@ class _Rd:
 # Blob laden
 # ----------------------------------------------------------------------------
 def load_saliency_blob(path):
-    """face_saliency.bin -> dict der Parameter (siehe verify_blobs_final.py)."""
+    """face_saliency.bin -> dict der Parameter (siehe verify_blobs_final.py).
+
+    Layout: c1w(8,3,3,3) c1b(8) c2w(4,8,3,3) c2b(4)
+            fc1w(16,12) fc1b(16) fc2w(1,16) fc2b(1)  -> 2964 B (MLP-Kopf).
+    """
     with open(path, "rb") as f:
         r = _Rd(f.read())
     P = {
         "c1w": r.arr(F32, (8, 3, 3, 3)), "c1b": r.arr(F32, (8,)),
         "c2w": r.arr(F32, (4, 8, 3, 3)), "c2b": r.arr(F32, (4,)),
-        "c":   r.arr(F32, (3, 5)),
-        "lgs": r.arr(F32, (3, 5)),
-        "Pc":  r.arr(F32, (125, 4)),
+        "fc1w": r.arr(F32, (16, 12)), "fc1b": r.arr(F32, (16,)),
+        "fc2w": r.arr(F32, (1, 16)),  "fc2b": r.arr(F32, (1,)),
     }
-    P["sig"] = numpy.log1p(numpy.exp(P["lgs"]))    # softplus(log_sigma)
     if r.o != len(r.b):
         print(f"WARN: Saliency-Blob {r.o}/{len(r.b)} Bytes geparst")
     return P
@@ -174,38 +193,34 @@ def saliency_forward(P, scene):
     f1 = conv2d_same_relu(scene, P["c1w"], P["c1b"])   # [8,128,128]
     f2 = conv2d_same_relu(f1, P["c2w"], P["c2b"])            # [4,128,128]
 
-    # Tile-Statistik: je 16x16-Kachel ueber [4,16,16]=1024 Werte
-    stats = numpy.zeros((GRID, GRID, 3), dtype=numpy.float64)
+    # Per-Kanal Tile-Statistik: je 16x16-Kachel und Kanal mean/max/var (ddof=0).
+    # Feature-Reihenfolge je Kachel: cc*3 + {0:mean, 1:max, 2:var} -> 12 Werte.
+    # blk -> float64 VOR mean/var: spiegelt die double-Akkumulation in nn.cpp.
+    stats = numpy.zeros((GRID, GRID, 12), dtype=numpy.float64)
     for j in range(GRID):
         for i in range(GRID):
-            blk = f2[:, j * TILE:(j + 1) * TILE, i * TILE:(i + 1) * TILE]
-            stats[j, i, 0] = blk.mean()
-            stats[j, i, 1] = blk.max()
-            stats[j, i, 2] = blk.var()               # Populationsvarianz (ddof=0)
+            for cc in range(4):
+                blk = f2[cc, j * TILE:(j + 1) * TILE,
+                         i * TILE:(i + 1) * TILE].astype(numpy.float64)
+                stats[j, i, cc * 3 + 0] = blk.mean()
+                stats[j, i, cc * 3 + 1] = blk.max()
+                stats[j, i, cc * 3 + 2] = blk.var()      # Populationsvarianz (ddof=0)
 
-    # Instanz-Norm ueber die 64 Kacheln je Statistik (std mit ddof=1), clamp +-3
-    for k in range(3):
+    # Instanz-Norm ueber die 64 Kacheln je Spalte (std mit ddof=1, +1e-5), clamp +-3
+    for k in range(12):
         s = stats[:, :, k]
         stats[:, :, k] = numpy.clip((s - s.mean()) / (s.std(ddof=1) + 1e-5), -3, 3)
 
-    # ANFIS je Kachel (125 Regeln, 5 MF pro Eingang)
-    c, sig, Pc = P["c"], P["sig"], P["Pc"]
+    # MLP-Kopf 12->16->1 je Kachel: h = relu(fc1w@x + fc1b); y = fc2w@h + fc2b.
+    fc1w, fc1b = P["fc1w"], P["fc1b"]
+    fc2w, fc2b = P["fc2w"], P["fc2b"]
     sal = numpy.zeros((GRID, GRID), dtype=numpy.float64)
     for j in range(GRID):
         for i in range(GRID):
-            xv = stats[j, i]
-            w_ = numpy.ones(125)
-            for r in range(125):
-                m0, m1, m2 = (r // 25) % 5, (r // 5) % 5, r % 5
-                mm = (m0, m1, m2)
-                val = 1.0
-                for k in range(3):
-                    dk = xv[k] - c[k, mm[k]]
-                    val *= numpy.exp(-(dk * dk) / (2.0 * sig[k, mm[k]] ** 2))
-                w_[r] = val
-            w_ = w_ / (w_.sum() + 1e-6)
-            lin = Pc[:, 0] + Pc[:, 1] * xv[0] + Pc[:, 2] * xv[1] + Pc[:, 3] * xv[2]
-            sal[j, i] = 1.0 / (1.0 + numpy.exp(-(w_ @ lin)))
+            xv = stats[j, i]                                    # [12]
+            h = numpy.maximum(fc1w @ xv + fc1b, 0.0)            # [16]
+            y = float(fc2w[0] @ h + fc2b[0])                    # Skalar
+            sal[j, i] = 1.0 / (1.0 + numpy.exp(-y))
     return sal
 
 
@@ -515,6 +530,217 @@ def patches_for(img, sal, regs, mode, min_size, max_size, rng):
 
 
 # ----------------------------------------------------------------------------
+# Modus "adaptive" - AUSFUEHRBARE SPEZIFIKATION fuer nn.cpp REGION_MODE_ADAPTIVE.
+# Deterministisch (kein RNG), Ganzzahl-Fenstermathematik -> Bit-fuer-Bit gegen
+# die Firmware pruefbar. Ersetzt den festen REGION_THR + Connected-Components-
+# Pfad durch adaptive Hysterese + tal-basiertes Peak-Splitting.
+# ----------------------------------------------------------------------------
+def _adaptive_thresholds(flat):
+    """flat: Liste[64] Saliency -> (mu, sd(ddof=1), T_high, T_low). Wie nn.cpp."""
+    mu = sum(flat) / N_TILES
+    ss = 0.0
+    for v in flat:
+        d = v - mu
+        ss += d * d
+    sd = (ss / (N_TILES - 1)) ** 0.5
+    th = mu + SEED_K * sd
+    if th < SEED_FLOOR:
+        th = SEED_FLOOR
+    if th > SEED_CEIL:
+        th = SEED_CEIL
+    tl = mu + GROW_K * sd
+    if tl < GROW_FLOOR:
+        tl = GROW_FLOOR
+    if tl > th:
+        tl = th
+    return mu, sd, th, tl
+
+
+def _adaptive_regions(sal):
+    """sal:[8,8] -> Regionen (dicts x0,y0,x1,y1,tiles,score), score-sortiert.
+
+    Spiegelt nn.cpp nn_regions (REGION_MODE_ADAPTIVE): Hysterese-Connected-
+    Components (Saat >=T_high, Wachstum >=T_low) + Peak-Split. Ein grosses Gesicht
+    (Plateau) bleibt EINE Region; zwei Gesichter mit Saliency-Tal dazwischen
+    trennen sich. Die Fensterzahl ergibt sich aus den Daten (0 bei leerer Szene).
+    """
+    flat = [float(v) for v in sal.ravel()]        # sal[j,i] -> flat[j*GRID+i]
+    _, _, th, tl = _adaptive_thresholds(flat)
+    d4 = ((-1, 0), (1, 0), (0, -1), (0, 1))
+
+    # Hysterese-Connected-Components: BFS nur von Saat-Kacheln (>=th).
+    comp = [-1] * N_TILES
+    seen = [False] * N_TILES
+    ncomp = 0
+    for start in range(N_TILES):
+        if seen[start] or flat[start] < th:
+            continue
+        stack = [start]
+        seen[start] = True
+        while stack:
+            t = stack.pop()
+            comp[t] = ncomp
+            y, x = t // GRID, t % GRID
+            for dy, dx in d4:
+                ny, nx = y + dy, x + dx
+                if 0 <= ny < GRID and 0 <= nx < GRID:
+                    nt = ny * GRID + nx
+                    if not seen[nt] and flat[nt] >= tl:
+                        seen[nt] = True
+                        stack.append(nt)
+        ncomp += 1
+    if ncomp == 0:
+        return []
+
+    regions = []
+    for c in range(ncomp):
+        # Prominenz-basierter Peak-Split (Watershed per Union-Find), 1:1 zu nn.cpp:
+        # Kacheln der Komponente absteigend nach Saliency verarbeiten. Die erste
+        # Kachel eines noch getrennten Hochpunkts oeffnet einen Peak; verbindet eine
+        # tiefere Kachel zwei Hochpunkte, fixiert dieser Sattel die Prominenz des
+        # schwaecheren Peaks (Hoehe ueber dem Sattel). Ein Peak ueberlebt nur bei
+        # Prominenz >= PROMINENCE -> Plateau (Sattel==Peak -> 0) bleibt EIN Peak,
+        # zwei Huegel ueber einem echten Tal ueberleben beide.
+        ordt = [t for t in range(N_TILES) if comp[t] == c]
+        ordt.sort(key=lambda tt: (-flat[tt], tt))
+        INF = 3.4e38
+        posrank = [N_TILES + 1] * N_TILES
+        parent = list(range(N_TILES))
+        peaktile = list(range(N_TILES))
+        ispeak = [False] * N_TILES
+        prom = [INF] * N_TILES
+        for a, t in enumerate(ordt):
+            posrank[t] = a
+
+        def _find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for a, t in enumerate(ordt):
+            y, x = t // GRID, t % GRID
+            roots = []                       # verschiedene Sets bereits gesehener Nachbarn
+            for dy, dx in d4:
+                ny, nx = y + dy, x + dx
+                if 0 <= ny < GRID and 0 <= nx < GRID:
+                    nt = ny * GRID + nx
+                    if comp[nt] != c or posrank[nt] >= a:
+                        continue             # nur hoehere/frueher verarbeitete Kacheln
+                    rt = _find(nt)
+                    if rt not in roots and len(roots) < 4:
+                        roots.append(rt)
+            if not roots:
+                ispeak[t] = True             # oeffnet neuen Peak
+            else:
+                hi = roots[0]                # staerkster Nachbar-Peak ueberlebt
+                for rq in roots[1:]:
+                    pa, pb = peaktile[rq], peaktile[hi]
+                    if flat[pa] > flat[pb] or (flat[pa] == flat[pb] and pa < pb):
+                        hi = rq
+                hipeak = peaktile[hi]
+                for rq in roots:             # jeder schwaechere Peak stirbt am Sattel
+                    if rq == hi:
+                        continue
+                    lp = peaktile[rq]
+                    pr = flat[lp] - flat[t]
+                    if pr < prom[lp]:
+                        prom[lp] = pr
+                parent[t] = hi
+                for rq in roots:
+                    if rq != hi:
+                        parent[rq] = hi
+                peaktile[hi] = hipeak
+        # Akzeptierte Peaks: Prominenz >= PROMINENCE (Top-Peak behaelt INF).
+        acc = [t for t in range(N_TILES)
+               if comp[t] == c and ispeak[t] and prom[t] >= PROMINENCE]
+        acc.sort(key=lambda tt: (-flat[tt], tt))
+        nacc = len(acc)
+        ngroup = 1 if nacc <= 1 else nacc
+
+        gi0 = [GRID] * ngroup
+        gj0 = [GRID] * ngroup
+        gi1 = [-1] * ngroup
+        gj1 = [-1] * ngroup
+        gcnt = [0] * ngroup
+        gscore = [0.0] * ngroup
+        for t in range(N_TILES):
+            if comp[t] != c:
+                continue
+            y, x = t // GRID, t % GRID
+            g = 0
+            if nacc > 1:
+                best, bestd = 0, 1 << 30
+                for b, a in enumerate(acc):
+                    ay, ax = a // GRID, a % GRID
+                    md = abs(y - ay) + abs(x - ax)
+                    if md < bestd:
+                        bestd = md
+                        best = b
+                g = best
+            if x < gi0[g]:
+                gi0[g] = x
+            if x > gi1[g]:
+                gi1[g] = x
+            if y < gj0[g]:
+                gj0[g] = y
+            if y > gj1[g]:
+                gj1[g] = y
+            gcnt[g] += 1
+            gscore[g] += flat[t]
+        for g in range(ngroup):
+            if gcnt[g] == 0:
+                continue
+            regions.append({
+                "x0": gi0[g] * TILE, "y0": gj0[g] * TILE,
+                "x1": (gi1[g] + 1) * TILE, "y1": (gj1[g] + 1) * TILE,
+                "tiles": gcnt[g], "score": float(gscore[g]),
+            })
+    regions.sort(key=lambda r: -r["score"])
+    return regions
+
+
+def _adaptive_windows(img, regs):
+    """Regionen -> rechteckige, regiongrosse Fenster (%Rand, Mindestseite, Clip).
+
+    Spiegelt nn.cpp nn_windows (REGION_MODE_ADAPTIVE) Ganzzahl-fuer-Ganzzahl.
+    Auf MAX_WINDOWS gedeckelt (Compute-Schutz, kein Ziel)."""
+    patches = []
+    for r in regs:
+        if len(patches) >= MAX_WINDOWS:
+            break
+        x0, y0, x1, y1 = r["x0"], r["y0"], r["x1"], r["y1"]
+        mw = (x1 - x0) * MARGIN_PCT // 100
+        mh = (y1 - y0) * MARGIN_PCT // 100
+        x0 -= mw
+        x1 += mw
+        y0 -= mh
+        y1 += mh
+        wd = x1 - x0
+        if wd < WIN_FLOOR:
+            need = WIN_FLOOR - wd
+            x0 -= need // 2
+            x1 += need - need // 2
+        hd = y1 - y0
+        if hd < WIN_FLOOR:
+            need = WIN_FLOOR - hd
+            y0 -= need // 2
+            y1 += need - need // 2
+        if x0 < 0:
+            x0 = 0
+        if y0 < 0:
+            y0 = 0
+        if x1 > SCENE:
+            x1 = SCENE
+        if y1 > SCENE:
+            y1 = SCENE
+        if x1 - x0 < 4 or y1 - y0 < 4:
+            continue
+        patches.append((img[y0:y1, x0:x1], x0, y0))
+    return patches
+
+
+# ----------------------------------------------------------------------------
 # Kamera-Preprocessing (spiegelt die Firmware)
 # ----------------------------------------------------------------------------
 def load_rgb_scene(path, center_crop=True):
@@ -563,19 +789,31 @@ def run(args):
     print(f"\n=== Saliency 8x8 (Schwelle REGION_THR={args.region_thr}) ===")
     print(f"  min={sal.min():.3f} max={sal.max():.3f} mean={sal.mean():.3f} "
           f"aktive Kacheln>=thr: {(sal >= args.region_thr).sum()}/64")
+    if args.mode == "adaptive":
+        mu, sd, th, tl = _adaptive_thresholds([float(v) for v in sal.ravel()])
+        print(f"  adaptive: mu={mu:.3f} sd={sd:.3f} "
+              f"-> T_high={th:.3f} T_low={tl:.3f}")
     if args.dump_saliency:
         for j in range(GRID):
             print("  " + " ".join(f"{sal[j, i]:.2f}" for i in range(GRID)))
 
     mask = sal >= args.region_thr
-    regs = extract_regions(mask)
-    print(f"\n=== Regionen (Connected Components, {len(regs)}) ===")
+    if args.mode == "adaptive":
+        regs = _adaptive_regions(sal)
+        print(f"\n=== Regionen (adaptive Hysterese + Peak-Split, {len(regs)}) ===")
+    else:
+        regs = extract_regions(mask)
+        print(f"\n=== Regionen (Connected Components, {len(regs)}) ===")
     for k, r in enumerate(regs):
+        sc = f" score={r['score']:.2f}" if "score" in r else ""
         print(f"  R{k}: tiles={r['tiles']:2d} "
-              f"bbox=({r['x0']},{r['y0']})-({r['x1']},{r['y1']})")
+              f"bbox=({r['x0']},{r['y0']})-({r['x1']},{r['y1']}){sc}")
 
-    patches = patches_for(scene, sal, regs, args.mode,
-                          args.min_size, args.max_size, rng)
+    if args.mode == "adaptive":
+        patches = _adaptive_windows(scene, regs)
+    else:
+        patches = patches_for(scene, sal, regs, args.mode,
+                              args.min_size, args.max_size, rng)
     print(f"\n=== Fenster (Modus={args.mode}, {len(patches)}) -> BNN ===")
     print(f"  FACE_CLASS={args.face_class}  BG_CLASS={args.bg_class}  gate={args.gate}")
 
@@ -643,9 +881,9 @@ def build_argparser():
     ap = argparse.ArgumentParser(
         description="Host-Simulator der ESP32-Gesichtserkennungs-Pipeline (NumPy).")
     ap.add_argument("--image", required=True, help="Eingabebild (jpg/png/npy)")
-    ap.add_argument("--mode", default="hybrid2",
-                    choices=["hybrid2", "refocus", "bbox"],
-                    help="Fenster-Strategie (Referenz-Default: hybrid2)")
+    ap.add_argument("--mode", default="adaptive",
+                    choices=["adaptive", "hybrid2", "refocus", "bbox"],
+                    help="Fenster-Strategie (Firmware-Default: adaptive)")
     ap.add_argument("--region-thr", type=float, default=REGION_THR)
     ap.add_argument("--gate", type=float, default=GATE)
     ap.add_argument("--bg-reject-p", type=float, default=BG_REJECT_P)

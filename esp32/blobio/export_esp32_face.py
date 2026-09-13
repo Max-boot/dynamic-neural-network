@@ -6,7 +6,7 @@ esp32/blobio/verify_blobs_final.py + verify_bnn_quant_final.py.
 
 Layout (Byte-genau, wie von den Verify-Skripten geparst):
   face_saliency.bin: c1w(8,3,3,3) c1b(8) c2w(4,8,3,3) c2b(4)
-                     c(3,5) log_sigma(3,5) P(125,4)                  -> 4184 B
+                     fc1w(16,12) fc1b(16) fc2w(1,16) fc2b(1)         -> 2964 B
   face_bnn.bin:      c1w(40,3,3,3) c1b(40) c2w(80,40,3,3) c2b(80)
                      fc1b(192) fc1s(192) fc1w8(192,3920) int8
                      fc2w(2,192) fc2b(2) fc3w(4,192) fc3b(4)         -> 878808 B
@@ -35,7 +35,7 @@ WICHTIG - der behobene Bug:
   fc1s macht die Dequantisierung exakt -> KEINE Firmware-Aenderung noetig.
 
 Voraussetzung: die Face-Checkpoints in pipeline/models/:
-  conv_anfis_saliency_face.pt   ("model" -> ConvANFISSaliency state_dict)
+  conv_mlp_saliency_face.pt     ("model" -> ConvMLPSaliency state_dict)
   bnn_mc_box_face.pt            ("model" -> BNN(n_class=2,...) state_dict)
 Diese .pt liegen NICHT im Repo; ohne sie koennen die Blobs nicht neu erzeugt
 werden (der alte Exporter und die .pt lebten ausserhalb dieses Repos).
@@ -56,19 +56,19 @@ import torch
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, os.path.join(_ROOT, "pipeline"))
-from stage12 import ConvANFISSaliency          # noqa: E402
+from stage12 import ConvMLPSaliency          # noqa: E402
 from bnn import BNN                             # noqa: E402
 
 MODELS = os.path.join(_ROOT, "pipeline", "models")
 OUT = os.path.join(_ROOT, "esp32", "models")
 
-SALIENCY_CKPT = "conv_anfis_saliency_face.pt"
+SALIENCY_CKPT = "conv_mlp_saliency_face.pt"
 BNN_CKPT = "bnn_mc_box_face.pt"
 SALIENCY_BIN = "face_saliency.bin"
 BNN_BIN = "face_bnn.bin"
 
 # Sanity: exakte Blob-Groessen, die Firmware/Skripte erwarten.
-SALIENCY_BYTES = 4184
+SALIENCY_BYTES = 2964
 BNN_BYTES = 878808
 IN_CH = 3
 
@@ -114,18 +114,19 @@ def quant_fc1(weight):
 
 # ---------------------------------------------------------------------------
 def export_saliency(out_path):
-    sal = ConvANFISSaliency(in_ch=IN_CH)
+    sal = ConvMLPSaliency(in_ch=IN_CH)
     sal.load_state_dict(_load_state(os.path.join(MODELS, SALIENCY_CKPT)))
     sal.eval()
 
     parts = [
-        _f32(sal.conv_stack.conv1.weight),   # c1w (8,1,3,3)
+        _f32(sal.conv_stack.conv1.weight),   # c1w (8,3,3,3)
         _f32(sal.conv_stack.conv1.bias),     # c1b (8,)
         _f32(sal.conv_stack.conv2.weight),   # c2w (4,8,3,3)
         _f32(sal.conv_stack.conv2.bias),     # c2b (4,)
-        _f32(sal.anfis.c),                   # c   (3,5)
-        _f32(sal.anfis.log_sigma),           # log_sigma (3,5)  (Firmware wendet softplus an)
-        _f32(sal.anfis.P),                   # P   (125,4)
+        _f32(sal.mlp.fc1.weight),            # fc1w (16,12)
+        _f32(sal.mlp.fc1.bias),              # fc1b (16,)
+        _f32(sal.mlp.fc2.weight),            # fc2w (1,16)
+        _f32(sal.mlp.fc2.bias),              # fc2b (1,)
     ]
     blob = b"".join(p.tobytes() for p in parts)
     _write(out_path, blob, SALIENCY_BYTES, "saliency")

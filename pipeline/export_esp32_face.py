@@ -1,13 +1,13 @@
 """
 Modell-Export fuer ESP32: Gesichtspipeline (Stage12-Saliency + BNN).
 
-- Saliency (conv_anfis_saliency_face.pt): ConvStack(3->8->4) + ANFIS(3x5->125 Regeln)
+- Saliency (conv_mlp_saliency_face.pt): ConvStack(3->8->4) + MLP(12->16->1)
 - BNN    (bnn_mc_box_face.pt):            Conv1(3ch)->BN1->Pool->Conv2->BN2->Pool
                                            -> FC3920x192 -> klassen(2) + box(4)
 
 Export-Format (Binaries, Layout wird vom ESP32-Code als bekannt angenommen):
   face_saliency.bin   [c1w(8,3,3,3), c1b(8), c2w(4,8,3,3), c2b(4),
-                        ANFIS.c(3,5), ANFIS.log_sigma(3,5), ANFIS.P(125,4)]
+                        fc1w(16,12), fc1b(16), fc2w(1,16), fc2b(1)]
   face_bnn.bin        [c1w(40,3,3,3), c1b(40), c2w(80,40,3,3), c2b(80),
                         fc1b(192), fc1_scale(192), fc1w8(192,3920) int8,
                         fc2w(2,192), fc2b(2), fc3w(4,192), fc3b(4)]
@@ -24,7 +24,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bnn import BNN
-from stage12 import ConvANFISSaliency
+from stage12 import ConvMLPSaliency
 
 MODELS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -70,16 +70,17 @@ def write_blob(path, chunks):
 def export_saliency(model, path):
     conv1 = model.conv_stack.conv1
     conv2 = model.conv_stack.conv2
-    c = model.anfis.c.detach().numpy().astype(numpy.float32)           # (3,5)
-    ls = model.anfis.log_sigma.detach().numpy().astype(numpy.float32)   # (3,5)
-    P = model.anfis.P.detach().numpy().astype(numpy.float32)            # (125,4)
+    fc1w = model.mlp.fc1.weight.detach().numpy().astype(numpy.float32)   # (16,12)
+    fc1b = model.mlp.fc1.bias.detach().numpy().astype(numpy.float32)     # (16,)
+    fc2w = model.mlp.fc2.weight.detach().numpy().astype(numpy.float32)   # (1,16)
+    fc2b = model.mlp.fc2.bias.detach().numpy().astype(numpy.float32)     # (1,)
     write_blob(path, [
         (F32, conv1.weight.detach()), (F32, conv1.bias.detach()),
         (F32, conv2.weight.detach()), (F32, conv2.bias.detach()),
-        (F32, c), (F32, ls), (F32, P),
+        (F32, fc1w), (F32, fc1b), (F32, fc2w), (F32, fc2b),
     ])
     return {"c1w": tuple(conv1.weight.shape), "c2w": tuple(conv2.weight.shape),
-            "c": c.shape, "P": P.shape}
+            "fc1w": fc1w.shape, "fc2w": fc2w.shape}
 
 
 def export_bnn(model, path):
@@ -108,9 +109,9 @@ IN_CH = 3
 
 def main():
     os.makedirs(OUT, exist_ok=True)
-    saliency = ConvANFISSaliency(in_ch=IN_CH)
+    saliency = ConvMLPSaliency(in_ch=IN_CH)
     saliency.load_state_dict(torch.load(
-        os.path.join(MODELS, "conv_anfis_saliency_face.pt"),
+        os.path.join(MODELS, "conv_mlp_saliency_face.pt"),
         map_location="cpu", weights_only=False)["model"])
     info_s = export_saliency(saliency, os.path.join(OUT, "face_saliency.bin"))
     print("Saliency-Export:", info_s)

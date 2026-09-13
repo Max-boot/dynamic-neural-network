@@ -27,7 +27,8 @@
 // ---------------------------------------------------------------------------
 #define SALIENCY_PATH     "/face_saliency.bin"
 #define BNN_PATH          "/face_bnn.bin"
-#define SALIENCY_BYTES    4184                 // sanity-check sizes on load
+#define SALIENCY_BYTES    2964                 // sanity-check sizes on load
+                                               // (MLP head: conv 8/4ch + fc 12-16-1)
 #define BNN_BYTES         878808
 
 // ---------------------------------------------------------------------------
@@ -59,22 +60,55 @@
 
 // ---------------------------------------------------------------------------
 // Region -> window strategy
-//   REGION_MODE_REFOCUS : one square crop per connected region, centered on the
-//                         saliency centroid, side = region extent clamped to
-//                         [WIN_MIN, WIN_MAX]. Best for single-subject faces and
-//                         bounds compute. Matches sim_pipeline.py --mode refocus.
-//   REGION_MODE_BBOX    : raw region bounding box (+margin). --mode bbox.
+//   REGION_MODE_ADAPTIVE : two-gate proposer (DEFAULT; matches sim --mode adaptive).
+//        Gate 1 (nn_regions): adaptive HYSTERESIS on the 8x8 saliency map decides
+//        WHERE to look. The number of windows is data-driven -- 0 on an empty
+//        scene, more only when the evidence is there; never a fixed count.
+//        A single large face stays ONE window; two faces separated by a saliency
+//        valley split into two (peak split). Windows are rectangular and sized to
+//        the region (very adaptive), not clamped to a fixed square.
+//        Gate 2 (pipeline.cpp): P(face) >= FACE_THR decides WHAT to draw -> as few
+//        boxes as possible without missing a face.
+//   REGION_MODE_REFOCUS  : legacy square crop, side clamped to [WIN_MIN,WIN_MAX].
+//   REGION_MODE_BBOX     : legacy raw region bounding box (+BBOX_MARGIN).
 // ---------------------------------------------------------------------------
+#define REGION_MODE_ADAPTIVE 2
 #define REGION_MODE_REFOCUS  0
 #define REGION_MODE_BBOX     1
-#define REGION_MODE          REGION_MODE_REFOCUS
+#define REGION_MODE          REGION_MODE_ADAPTIVE
+
+// --- Gate 1: adaptive hysteresis proposer (REGION_MODE_ADAPTIVE) ------------
+// Per-frame thresholds from the 64-tile saliency mean (mu) and sample std (sd):
+//   T_high = clamp(mu + SEED_K*sd, SEED_FLOOR, SEED_CEIL)  // confirms a region
+//   T_low  = clamp(mu + GROW_K*sd, GROW_FLOOR, T_high)     // grows its extent
+// SEED_FLOOR keeps flat / empty scenes from seeding noise; SEED_CEIL guarantees a
+// very confident (e.g. full-frame) face still seeds even when sd is tiny.
+#define SEED_K            2.0f
+#define GROW_K            0.5f
+#define SEED_FLOOR        0.55f
+#define SEED_CEIL         0.80f
+#define GROW_FLOOR        0.40f
+// Peak split (valley/prominence based, NOT spatial): within one region a second
+// peak is kept only if it stands at least PROMINENCE (saliency) above the saddle
+// that connects it to a stronger peak. A flat plateau (big face) has saddle==peak
+// -> prominence 0 -> stays ONE peak; two hills across a real saliency valley have
+// a deep saddle -> both survive -> the region splits. Larger => harder to split.
+#define PROMINENCE        0.15f
+// Window sizing: symmetric margin as a percent of the region side (integer math,
+// bit-identical to the sim), then a minimum side so the BNN always gets enough
+// pixels. The ceiling is the scene edge -> size is fully adaptive upward.
+#define MARGIN_PCT        15
+#define WIN_FLOOR         24
+
+// --- legacy (REGION_MODE_REFOCUS / _BBOX only) ------------------------------
 #define WIN_MIN           24
 #define WIN_MAX           48
 #define BBOX_MARGIN       2
 
-// Cap windows evaluated per frame (each BNN pass is heavy on a plain ESP32).
-// Regions are sorted largest-first, so the most salient blobs win.
-#define MAX_WINDOWS       4
+// Safety ceiling on windows / BNN passes per frame (each pass is heavy on a plain
+// ESP32). With the adaptive proposer this is rarely reached -- it is a compute
+// guard, NOT a target. Regions are sorted by saliency, so the strongest win.
+#define MAX_WINDOWS       6
 #define MAX_DETS          8      // detections retained for overlay
 
 // ---------------------------------------------------------------------------

@@ -12,9 +12,6 @@
 SaliencyModel g_sal;
 BnnModel      g_bnn;
 
-// ---- helpers ---------------------------------------------------------------
-static inline float softplus(float x) { return log1pf(expf(x)); }
-
 // ---- public API ------------------------------------------------------------
 bool storage_begin() {
   // LittleFS still mounted for the (legacy) web upload endpoint even though
@@ -33,10 +30,10 @@ static bool parse_saliency() {
   g_sal.c1b = p;              p += 8;               // 8
   g_sal.c2w = p;              p += 4 * 8 * 3 * 3;   // 288
   g_sal.c2b = p;              p += 4;               // 4
-  g_sal.c   = p;              p += 3 * 5;           // 15
-  g_sal.logsig = p;           p += 3 * 5;           // 15
-  g_sal.P   = p;              p += 125 * 4;         // 500
-  for (int i = 0; i < 15; i++) g_sal.sigma[i] = softplus(g_sal.logsig[i]);
+  g_sal.fc1w = p;             p += 16 * 12;         // 192
+  g_sal.fc1b = p;             p += 16;              // 16
+  g_sal.fc2w = p;             p += 1 * 16;          // 16
+  g_sal.fc2b = p;             p += 1;               // 1
   if (FACE_SALIENCY_BYTES != SALIENCY_BYTES) {
     Serial.printf("[model] saliency embedded %u != expect %u\n",
                   (unsigned)FACE_SALIENCY_BYTES, (unsigned)SALIENCY_BYTES);

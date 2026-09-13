@@ -2,7 +2,7 @@
 
 Layout laut export_esp32_face.py:
   face_saliency.bin: c1w(8,3,3,3) c1b(8) c2w(4,8,3,3) c2b(4)
-                     c(3,5) log_sigma(3,5) P(125,4)
+                     fc1w(16,12) fc1b(16) fc2w(1,16) fc2b(1)
   face_bnn.bin:      c1w(40,3,3,3) c1b(40) c2w(80,40,3,3) c2b(80)
                      fc1b(192) fc1s(192) fc1w8(192,3920) int8
                      fc2w(2,192) fc2b(2) fc3w(4,192) fc3b(4)
@@ -17,7 +17,7 @@ import torch
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, os.path.join(_ROOT, "pipeline"))
-from stage12 import ConvANFISSaliency, to_model_input
+from stage12 import ConvMLPSaliency, to_model_input
 from bnn import BNN
 
 MODELS = os.path.join(_ROOT, "pipeline", "models")
@@ -79,8 +79,8 @@ def fold_bn(w, b, bn):
 
 def main():
     # ---------- Torch-Referenz laden ----------
-    sal = ConvANFISSaliency(in_ch=3)
-    sal.load_state_dict(torch.load(os.path.join(MODELS, "conv_anfis_saliency_face.pt"),
+    sal = ConvMLPSaliency(in_ch=3)
+    sal.load_state_dict(torch.load(os.path.join(MODELS, "conv_mlp_saliency_face.pt"),
                                    map_location="cpu",
                                    weights_only=False)["model"])
     sal.eval()
@@ -96,8 +96,8 @@ def main():
     r = Rd(sb)
     c1w = r.arr(F32, (8, 3, 3, 3)); c1b = r.arr(F32, (8,))
     c2w = r.arr(F32, (4, 8, 3, 3)); c2b = r.arr(F32, (4,))
-    c = r.arr(F32, (3, 5)); lgs = r.arr(F32, (3, 5)); P = r.arr(F32, (125, 4))
-    sig = numpy.log1p(numpy.exp(lgs))
+    fc1w = r.arr(F32, (16, 12)); fc1b = r.arr(F32, (16,))
+    fc2w = r.arr(F32, (1, 16)); fc2b = r.arr(F32, (1,))
     print(f"Saliency-Blob geparst: {r.o}/{len(sb)} Bytes")
 
     rng = numpy.random.default_rng(7)
@@ -110,33 +110,27 @@ def main():
                 sal(torch.from_numpy(to_model_input(scene[None])))).numpy().reshape(8, 8)
         f1 = conv2d_same(to_model_input(scene[None]), c1w, c1b)
         f2 = conv2d_same(f1, c2w, c2b)
-        stats = numpy.zeros((8, 8, 3))
+        # per-Kanal Tile-Stats -> [8,8,12], Reihenfolge c*3+{mean,max,var}
+        stats = numpy.zeros((8, 8, 12))
         for j in range(8):
             for i in range(8):
-                blk = f2[0, :, j * 16:(j + 1) * 16, i * 16:(i + 1) * 16]
-                stats[j, i, 0] = blk.mean()
-                stats[j, i, 1] = blk.max()
-                stats[j, i, 2] = blk.var()
-        for k in range(3):
+                for cc in range(4):
+                    blk = f2[0, cc, j * 16:(j + 1) * 16,
+                             i * 16:(i + 1) * 16].astype(numpy.float64)
+                    stats[j, i, cc * 3 + 0] = blk.mean()
+                    stats[j, i, cc * 3 + 1] = blk.max()
+                    stats[j, i, cc * 3 + 2] = blk.var()
+        for k in range(12):
             s = stats[:, :, k]
             stats[:, :, k] = numpy.clip(
                 (s - s.mean()) / (s.std(ddof=1) + 1e-5), -3, 3)
         n_sal = numpy.zeros((8, 8))
         for j in range(8):
             for i in range(8):
-                xv = stats[j, i]
-                w_ = numpy.ones(125)
-                for r_ in range(125):
-                    m = (r_ // 25) % 5, (r_ // 5) % 5, r_ % 5
-                    val = 1.0
-                    for k in range(3):
-                        dk = xv[k] - c[k, m[k]]
-                        val *= numpy.exp(-(dk * dk) / (2 * sig[k, m[k]] ** 2))
-                    w_[r_] = val
-                w_ = w_ / (w_.sum() + 1e-6)
-                lin = P[:, 0] + P[:, 1] * xv[0] + P[:, 2] * xv[1] + \
-                    P[:, 3] * xv[2]
-                n_sal[j, i] = 1.0 / (1.0 + numpy.exp(-(w_ @ lin)))
+                xv = stats[j, i]                              # [12]
+                h = numpy.maximum(fc1w @ xv + fc1b, 0.0)      # [16]
+                y = float(fc2w[0] @ h + fc2b[0])              # Skalar
+                n_sal[j, i] = 1.0 / (1.0 + numpy.exp(-y))
         maxd_sal = max(maxd_sal, numpy.abs(n_sal - t_sal_h).max())
     print(f"Saliency: numpy vs torch max|diff| = {maxd_sal:.2e}")
 

@@ -74,7 +74,7 @@ To join your own network instead, set `WIFI_AP_MODE 0` and fill `STA_SSID` /
 
 ## 4. Model blobs are embedded (no upload needed)
 
-The trained blobs (`esp32/models/face_saliency.bin` 4184 B, `face_bnn.bin`
+The trained blobs (`esp32/models/face_saliency.bin` 2964 B, `face_bnn.bin`
 878808 B) are compiled directly into the firmware as PROGMEM arrays. After
 flashing, the model is **already there** — no LittleFS upload, no reboot dance.
 
@@ -148,7 +148,7 @@ box) is also available (`REGION_MODE` in `config.h`).
 | `pipeline.h/.cpp` | mutex-guarded shared state + the core-1 inference loop |
 | `web.h/.cpp` | esp_http_server: index, MJPEG stream, status |
 | `../tools/sim_pipeline.py` | NumPy reference the firmware mirrors — use it to calibrate |
-| `../models/*.bin` | the trained blobs (`face_saliency.bin` 4184 B, `face_bnn.bin` 878808 B) |
+| `../models/*.bin` | the trained blobs (`face_saliency.bin` 2964 B, `face_bnn.bin` 878808 B) |
 
 ---
 

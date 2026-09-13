@@ -81,6 +81,86 @@ class TileStats(nn.Module):
         return s.permute(0, 2, 1)                    # [B,64,3]
 
 
+class TileStatsPerChannel(nn.Module):
+    """Wie TileStats, aber die Kanaldimension bleibt erhalten: je 16x16-Kachel
+    mean/max/var PRO Conv-Kanal -> [B, GRID*GRID, C*3]. Bei C=4 => 12 Features.
+
+    Feature-Reihenfolge (fest, gespiegelt in nn.cpp + sim_pipeline.py):
+        index = c*3 + s,  c in 0..C-1,  s in {0:mean, 1:max, 2:var}
+        -> [c0_mean, c0_max, c0_var, c1_mean, ...]
+    Instanz-Norm je der C*3 Feature-Spalten unabhaengig ueber die 64 Kacheln.
+    """
+    def __init__(self, tile=TILE, grid=GRID):
+        super().__init__()
+        self.tile = tile
+        self.grid = grid
+
+    def forward(self, feat):  # [B,C,128,128]
+        B, C, H, W = feat.shape
+        g = self.grid
+        t = self.tile
+        # [B,C,g,t,g,t] -> [B,g,g,C,t,t] -> [B,g,g,C,t*t] (Kanal bleibt getrennt)
+        f = feat.view(B, C, g, t, g, t).permute(0, 2, 4, 1, 3, 5)
+        f = f.reshape(B, g, g, C, t * t)
+        mean = f.mean(dim=-1)                 # [B,g,g,C]
+        mx = f.max(dim=-1).values             # [B,g,g,C]
+        var = f.var(dim=-1, unbiased=False)   # [B,g,g,C]
+        # stack -> [B,g,g,C,3] -> reshape [B,g,g,C*3] : Reihenfolge c*3+s
+        stats = torch.stack([mean, mx, var], dim=-1)      # [B,g,g,C,3]
+        F_ = C * 3
+        stats = stats.reshape(B, g * g, F_)               # [B,64,C*3]
+        # Instanz-Norm je Feature-Spalte ueber die Kacheln (ddof=1, clamp +-3)
+        s = stats.permute(0, 2, 1)                         # [B,C*3,64]
+        s = (s - s.mean(dim=2, keepdim=True)) / (s.std(dim=2, keepdim=True) + 1e-5)
+        s = s.clamp(-3.0, 3.0)
+        return s.permute(0, 2, 1)                          # [B,64,C*3]
+
+
+class MLPHead(nn.Module):
+    """Saliency-Kopf: 12 -> 16 -> 1 (ReLU-Hidden, roher Logit-Ausgang).
+
+    Eingabe:  [B, 12]  (per-Kanal mean/max/var, instanz-normalisiert, clamp +-3)
+    Ausgabe:  [B, 1]   (Saliency-Logit; aussen Sigmoid anwenden)
+    Ersetzt den ANFIS: 0 Transzendente im Hidden (ReLU), deterministisch,
+    exakt int-spiegelbar C<->Sim.
+    """
+    def __init__(self, n_in=12, hidden=16):
+        super().__init__()
+        self.fc1 = nn.Linear(n_in, hidden)
+        self.fc2 = nn.Linear(hidden, 1)
+
+    def forward(self, x):                      # [B,12] -> [B,1]
+        return self.fc2(F.relu(self.fc1(x)))
+
+
+class ConvMLPSaliency(nn.Module):
+    """Stage1+2 (MLP-Variante): [B,C,128,128] -> saliency [B,GRID*GRID] (Logits).
+
+    Wie ConvANFISSaliency, aber per-Kanal-TileStats (12 Features) + MLPHead statt
+    ANFIS. Dies ist das FUER DEN ESP32 deployte RGB-Modell (in_ch=3 im Training).
+    """
+    def __init__(self, in_ch=1):
+        super().__init__()
+        self.in_ch = in_ch
+        self.conv_stack = ConvStack(in_ch=in_ch, out_ch=4)
+        self.tile_stats = TileStatsPerChannel()
+        self.mlp = MLPHead(n_in=12, hidden=16)
+
+    def forward(self, x):
+        feat = self.conv_stack(x)              # [B,4,128,128]
+        stats = self.tile_stats(feat)          # [B,64,12]
+        B = stats.shape[0]
+        flat = stats.reshape(-1, 12)           # [B*64,12]
+        logits = self.mlp(flat)                # [B*64,1]
+        return logits.reshape(B, GRID * GRID)  # [B,64]
+
+    @torch.no_grad()
+    def extract_features(self, x):
+        """Liefert [B,64,12] (per-Kanal mean/max/var, instanz-normalisiert)."""
+        feat = self.conv_stack(x)
+        return self.tile_stats(feat)
+
+
 class ConvANFISSaliency(nn.Module):
     """Stage1+2 kombiniert: [B,C,128,128] -> saliency [B,GRID,GRID] (Logits)."""
     def __init__(self, n_in=3, n_mf=5, sigma_init=0.9, in_ch=1):

@@ -1,10 +1,11 @@
 """
 Training Gesichtspipeline (Stufe 1+2 Saliency + Stufe 4+5 BNN) auf WIDER-Szenen.
 
-  - Stage12: ConvANFISSaliency (902 Params) end-to-end BCE auf 8x8-Tiles.
+  - Stage12: ConvMLPSaliency (per-Kanal mean/max/var -> MLP 12-16-1) end-to-end
+    BCE auf 8x8-Tiles.
   - BNN: n_class=2 (0=Gesicht, 1=Hintergrund), Box-Head (cx,cy,w,h).
     Multitask-Loss: CE(gewichtet) + SmoothL1(Box nur bei Gesicht).
-Speichert conv_anfis_saliency_face.pt + bnn_mc_box_face.pt + Kurven/CSV.
+Speichert conv_mlp_saliency_face.pt + bnn_mc_box_face.pt + Kurven/CSV.
 """
 import errno
 import os
@@ -20,7 +21,7 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from data_common import load_scene_split, boxes_to_tiles
-from stage12 import ConvANFISSaliency, train_stage12, eval_stage12
+from stage12 import ConvMLPSaliency, train_stage12, eval_stage12
 from bnn import BNN
 from face_data import build_face_datasets
 
@@ -122,14 +123,14 @@ def main():
           f"pos-rate={tr_tiles.mean():.3f}")
 
     torch.manual_seed(42)
-    saliency = ConvANFISSaliency(in_ch=IN_CH)
+    saliency = ConvMLPSaliency(in_ch=IN_CH)
     losses = train_stage12(saliency, tr_imgs, tr_tiles, epochs=EPOCHS_S12,
                            batch=64, lr=1e-3, device=dev)
     te_met = eval_stage12(saliency, te_imgs, te_tiles, device=dev)
     print("Stage12 Val:", {k: round(v, 3) for k, v in te_met.items()})
     torch.save({"model": saliency.state_dict(), "metrics": te_met,
                 "losses": losses},
-               os.path.join(MODELS, "conv_anfis_saliency_face.pt"))
+               os.path.join(MODELS, "conv_mlp_saliency_face.pt"))
 
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.plot(losses, marker="o")

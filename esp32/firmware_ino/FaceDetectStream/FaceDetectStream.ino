@@ -10,7 +10,7 @@
 //    Core 0  http server : streams the published JPEG as MJPEG (esp_http_server,
 //            pinned to core 0 in web.cpp).
 //    Core 1  inference_task : reads a scene snapshot, runs the full cascade
-//            (Conv+ANFIS saliency -> regions -> refocus windows -> int8 BNN +
+//            (Conv+MLP saliency -> regions -> refocus windows -> int8 BNN +
 //            box head), publishes detections. Never touches the camera.
 //
 //  Only the camera task calls esp_camera_fb_get/return, so there is never

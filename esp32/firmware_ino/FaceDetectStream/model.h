@@ -4,7 +4,7 @@
 //              is fixed by the exporter (see esp32/blobio/verify_blobs_final.py):
 //
 //   face_saliency.bin: c1w(8,3,3,3) c1b(8) c2w(4,8,3,3) c2b(4)
-//                      c(3,5) log_sigma(3,5) P(125,4)              [4184 B]
+//                      fc1w(16,12) fc1b(16) fc2w(1,16) fc2b(1)     [2964 B]
 //   face_bnn.bin:      b1w(40,3,3,3) b1b(40) b2w(80,40,3,3) b2b(80)
 //                      fc1b(192) fc1s(192) fc1w8(192,3920) int8
 //                      fc2w(2,192) fc2b(2) fc3w(4,192) fc3b(4)     [878808 B]
@@ -19,10 +19,10 @@ struct SaliencyModel {
   const float* c1b;            // (8)
   const float* c2w;            // (4,8,3,3)
   const float* c2b;            // (4)
-  const float* c;              // (3,5) gaussian centers
-  const float* logsig;         // (3,5) raw log-sigma
-  const float* P;              // (125,4) consequents
-  float sigma[15];             // softplus(logsig), precomputed
+  const float* fc1w;           // (16,12) hidden weights
+  const float* fc1b;           // (16)    hidden bias
+  const float* fc2w;           // (1,16)  output weights
+  const float* fc2b;           // (1)     output bias
 };
 
 struct BnnModel {

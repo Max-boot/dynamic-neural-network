@@ -14,7 +14,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from data_common import load_scene_split, boxes_iou
-from stage12 import ConvANFISSaliency, to_model_input
+from stage12 import ConvMLPSaliency, to_model_input
 from bnn import BNN
 from evaluate_pipeline import (_regions_from_saliency, _patches_for,
                                _crop_tensor)
@@ -104,9 +104,9 @@ def main():
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {dev}")
 
-    saliency = ConvANFISSaliency(in_ch=IN_CH)
+    saliency = ConvMLPSaliency(in_ch=IN_CH)
     saliency.load_state_dict(torch.load(
-        os.path.join(MODELS, "conv_anfis_saliency_face.pt"),
+        os.path.join(MODELS, "conv_mlp_saliency_face.pt"),
         map_location="cpu", weights_only=False)["model"])
     bnn = BNN(n_class=2, box_head=True, c1=BNN_C1, c2=BNN_C2, hid=BNN_HID,
               in_ch=IN_CH)
