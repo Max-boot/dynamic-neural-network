@@ -27,12 +27,13 @@
 // ---------------------------------------------------------------------------
 #define SALIENCY_PATH     "/face_saliency.bin"
 #define BNN_PATH          "/face_bnn.bin"
-#define SALIENCY_BYTES    3608                 // sanity-check sizes on load
-#define BNN_BYTES         875928
+#define SALIENCY_BYTES    4184                 // sanity-check sizes on load
+#define BNN_BYTES         878808
 
 // ---------------------------------------------------------------------------
 // Pipeline geometry (fixed by the trained model -- do NOT change)
 // ---------------------------------------------------------------------------
+#define N_CH              3      // model input channels (RGB)
 #define SCENE             128    // model input side
 #define TILE              16
 #define GRID              8      // SCENE / TILE

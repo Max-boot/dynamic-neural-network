@@ -38,13 +38,13 @@ def main():
     with open(BLOB, "rb") as f:
         bb = f.read()
     r = Rd(bb)
-    r.arr(F32, (40, 1, 3, 3)); r.arr(F32, (40,))
+    r.arr(F32, (40, 3, 3, 3)); r.arr(F32, (40,))
     r.arr(F32, (80, 40, 3, 3)); r.arr(F32, (80,))
     fc1b = r.arr(F32, (192,)); fc1s = r.arr(F32, (192,))
     blob8 = r.arr(I8S, (192, 3920)).astype(numpy.int16)
     print(f"Blob-Parse: {r.o}/{len(bb)} (FC1-pos ok)")
 
-    bnn = BNN(n_class=2, box_head=True, c1=40, c2=80, hid=192)
+    bnn = BNN(n_class=2, box_head=True, c1=40, c2=80, hid=192, in_ch=3)
     bnn.load_state_dict(torch.load(
         os.path.join(_ROOT, "pipeline", "models", "bnn_mc_box_face.pt"),
         map_location="cpu", weights_only=False)["model"])

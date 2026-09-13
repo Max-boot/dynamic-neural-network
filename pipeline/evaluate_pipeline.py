@@ -44,7 +44,10 @@ BNN_C1, BNN_C2, BNN_HID = 40, 80, 192
 
 
 def _crop_tensor(patch):
-    return torch.from_numpy(crop(patch, 28).copy()).unsqueeze(0).unsqueeze(0)
+    c = crop(patch, 28).copy()
+    if c.ndim == 2:                       # [28,28] grayscale
+        return torch.from_numpy(c)[None, None]
+    return torch.from_numpy(numpy.transpose(c, (2, 0, 1)))[None]  # [1,C,28,28]
 
 
 def _regions_from_saliency(sal):

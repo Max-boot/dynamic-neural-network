@@ -29,7 +29,7 @@ static bool parse_saliency() {
   // PROGMEM array is __attribute__((aligned(4))), so the float* view is safe.
   const float* p = (const float*)face_saliency_data;
   g_sal.raw = (const uint8_t*)face_saliency_data;
-  g_sal.c1w = p;              p += 8 * 1 * 3 * 3;   // 72
+  g_sal.c1w = p;              p += 8 * 3 * 3 * 3;   // 216
   g_sal.c1b = p;              p += 8;               // 8
   g_sal.c2w = p;              p += 4 * 8 * 3 * 3;   // 288
   g_sal.c2b = p;              p += 4;               // 4
@@ -51,17 +51,17 @@ static bool parse_bnn() {
   g_bnn.raw = b;
   size_t o = 0;                              // byte offset walker
   auto R = [&](size_t n) -> const float* { const float* r = (const float*)(b + o); o += n * 4; return r; };  // NOTE: darf nicht 'F' heissen (Arduino F()-Makro)
-  g_bnn.b1w  = R(360);                // 360 f  -> off 1440
-  g_bnn.b1b  = R(40);                 // off 1600
-  g_bnn.b2w  = R(80 * 40 * 3 * 3);    // 28800 f -> off 116800
-  g_bnn.b2b  = R(80);                 // off 117120
-  g_bnn.fc1b = R(192);                // off 117888
-  g_bnn.fc1s = R(192);                // off 118656
-  g_bnn.fc1w8 = (const int8_t*)(b + o); o += 192 * 3920;   // off 871296
-  g_bnn.fc2w = R(2 * 192);            // off 872832
-  g_bnn.fc2b = R(2);                  // off 872840
-  g_bnn.fc3w = R(4 * 192);            // off 875912
-  g_bnn.fc3b = R(4);                  // off 875928
+  g_bnn.b1w  = R(40 * 3 * 3 * 3);     // 1080 f -> off 4320
+  g_bnn.b1b  = R(40);                 // off 4480
+  g_bnn.b2w  = R(80 * 40 * 3 * 3);    // 28800 f -> off 119680
+  g_bnn.b2b  = R(80);                 // off 120000
+  g_bnn.fc1b = R(192);                // off 120768
+  g_bnn.fc1s = R(192);                // off 121536
+  g_bnn.fc1w8 = (const int8_t*)(b + o); o += 192 * 3920;   // off 874176
+  g_bnn.fc2w = R(2 * 192);            // off 875712
+  g_bnn.fc2b = R(2);                  // off 875720
+  g_bnn.fc3w = R(4 * 192);            // off 878792
+  g_bnn.fc3b = R(4);                  // off 878808
   if (o != BNN_BYTES) {
     Serial.printf("[model] BNN parse offset %u != %u\n", (unsigned)o, BNN_BYTES);
     return false;

@@ -21,15 +21,21 @@ N_TILES = GRID * GRID      # 64
 
 
 def load_scene_split(split: str = "train", base=None):
-    """Laedt einen Scene-Split (.npz) und gibt dict mit Arrays zurueck."""
+    """Laedt einen Scene-Split (.npz) und gibt dict mit Arrays zurueck.
+
+    images ist [N,128,128] (Graustufen) oder [N,128,128,3] (RGB), je nachdem
+    ob das NPZ einen 3. Kanal-Trailing hat; immer /255.0 -> 0..1 float32.
+    """
     if base is None:
         base = os.path.join(PROJECT_ROOT, "scene_dataset")
     path = os.path.join(base, f"scene_{split}.npz")
     if not os.path.exists(path):
         raise FileNotFoundError(path)
     d = numpy.load(path)
+    im = d["images"]
+    im = im.astype(numpy.float32) / 255.0
     return {
-        "images": d["images"].astype(numpy.float32) / 255.0,   # [N,128,128] 0..1
+        "images": im,                                    # [N,128,128] | [N,128,128,3]
         "boxes": d["digit_boxes"].astype(numpy.float32),       # [N,K,4]
         "labels": d["digit_labels"].astype(numpy.int64),       # [N,K]
         "sizes": d["digit_sizes"].astype(numpy.int64),         # [N,K]
@@ -73,10 +79,12 @@ def tile_coords(grid=GRID, tile=TILE):
 
 def crop(patch, size=28):
     """
-    Zentriertes bilineares Resize eines 2D-Uint8/float32-Patches auf (size,size).
-    Nutzt nur numpy (kein torch), damit es in der Datengenerierung funktioniert.
+    Bilineares Resize eines Uint8/float32-Patches auf (size,size).
+    Unterstuetzt 2D [H,W] und 3D [H,W,C] (RGB-Kanal-ledig oder beliebig).
+    Gibt [size,size] oder [size,size,C] zurueck.
     """
-    h, w = patch.shape
+    h, w = patch.shape[:2]
+    C = patch.shape[2] if patch.ndim >= 3 else 0
     ys = numpy.linspace(0, h - 1, size).astype(numpy.float64)
     xs = numpy.linspace(0, w - 1, size).astype(numpy.float64)
     y0 = numpy.floor(ys).astype(numpy.int64)
@@ -85,10 +93,23 @@ def crop(patch, size=28):
     x1 = numpy.minimum(x0 + 1, w - 1)
     fy = ys - y0
     fx = xs - x0
-    v = patch[y0, :][:, x0] * (1 - fy)[:, None] * (1 - fx)[None, :] \
-        + patch[y0, :][:, x1] * (1 - fy)[:, None] * fx[None, :] \
-        + patch[y1, :][:, x0] * fy[:, None] * (1 - fx)[None, :] \
-        + patch[y1, :][:, x1] * fy[:, None] * fx[None, :]
+    if C == 0:
+        v = patch[y0, :][:, x0] * (1 - fy)[:, None] * (1 - fx)[None, :] \
+            + patch[y0, :][:, x1] * (1 - fy)[:, None] * fx[None, :] \
+            + patch[y1, :][:, x0] * fy[:, None] * (1 - fx)[None, :] \
+            + patch[y1, :][:, x1] * fy[:, None] * fx[None, :]
+    else:
+        # Patch ist [H,W,C]; adv. Indexing fuer 3D: euklidische Coords zu [N,2]-
+        # indizes kombinieren und ueber die Flaechenindizes splitten.
+        # Einfacher: pro Kanal einzeln (schnell genug fuer Pfad ~wenige kB).
+        ch = patch.reshape(h, w, C)
+        v = numpy.empty((size, size, C), dtype=patch.dtype)
+        for c in range(C):
+            pc = ch[:, :, c]
+            v[:, :, c] = (pc[y0, :][:, x0] * (1 - fy)[:, None] * (1 - fx)[None, :]
+                          + pc[y0, :][:, x1] * (1 - fy)[:, None] * fx[None, :]
+                          + pc[y1, :][:, x0] * fy[:, None] * (1 - fx)[None, :]
+                          + pc[y1, :][:, x1] * fy[:, None] * fx[None, :])
     return v.astype(numpy.float32) if v.dtype != numpy.uint8 else v
 
 

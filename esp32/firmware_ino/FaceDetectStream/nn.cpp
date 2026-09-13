@@ -85,36 +85,40 @@ static void maxpool2(const float* in, int C, int H, int W, float* out) {
   }
 }
 
-// ---- bilinear resize of a scene sub-rectangle ------------------------------
+// ---- bilinear resize of a scene sub-rectangle (all N_CH planes) -------------
 void nn_crop_resize(const float* scene, int x0, int y0, int w, int h,
                     float* dst, int size) {
   // linspace(0, dim-1, size) sampling, matches data_common.crop.
   const float sy = (h > 1) ? (float)(h - 1) / (float)(size - 1) : 0.0f;
   const float sx = (w > 1) ? (float)(w - 1) / (float)(size - 1) : 0.0f;
-  for (int j = 0; j < size; j++) {
-    float fy = j * sy;
-    int yy0 = (int)floorf(fy);
-    int yy1 = yy0 + 1; if (yy1 > h - 1) yy1 = h - 1;
-    float wy = fy - yy0;
-    const float* r0 = scene + (y0 + yy0) * SCENE + x0;
-    const float* r1 = scene + (y0 + yy1) * SCENE + x0;
-    for (int i = 0; i < size; i++) {
-      float fx = i * sx;
-      int xx0 = (int)floorf(fx);
-      int xx1 = xx0 + 1; if (xx1 > w - 1) xx1 = w - 1;
-      float wx = fx - xx0;
-      float v = r0[xx0] * (1 - wy) * (1 - wx)
-              + r0[xx1] * (1 - wy) * wx
-              + r1[xx0] * wy * (1 - wx)
-              + r1[xx1] * wy * wx;
-      dst[j * size + i] = v;
+  for (int c = 0; c < N_CH; c++) {
+    const float* sc = scene + c * SCENE * SCENE;   // channel plane
+    float* dc = dst + c * size * size;
+    for (int j = 0; j < size; j++) {
+      float fy = j * sy;
+      int yy0 = (int)floorf(fy);
+      int yy1 = yy0 + 1; if (yy1 > h - 1) yy1 = h - 1;
+      float wy = fy - yy0;
+      const float* r0 = sc + (y0 + yy0) * SCENE + x0;
+      const float* r1 = sc + (y0 + yy1) * SCENE + x0;
+      for (int i = 0; i < size; i++) {
+        float fx = i * sx;
+        int xx0 = (int)floorf(fx);
+        int xx1 = xx0 + 1; if (xx1 > w - 1) xx1 = w - 1;
+        float wx = fx - xx0;
+        float v = r0[xx0] * (1 - wy) * (1 - wx)
+                + r0[xx1] * (1 - wy) * wx
+                + r1[xx0] * wy * (1 - wx)
+                + r1[xx1] * wy * wx;
+        dc[j * size + i] = v;
+      }
     }
   }
 }
 
 // ---- Stage 1+2: saliency ---------------------------------------------------
 void nn_saliency(const float* scene, float* sal) {
-  conv3x3_same_relu(scene, 1, SCENE, SCENE, g_sal.c1w, g_sal.c1b, 8, s_f1);
+  conv3x3_same_relu(scene, N_CH, SCENE, SCENE, g_sal.c1w, g_sal.c1b, 8, s_f1);
   conv3x3_same_relu(s_f1, 8, SCENE, SCENE, g_sal.c2w, g_sal.c2b, 4, s_f2);
 
   // Per-tile mean / max / population-var over the 4x16x16 = 1024 values.
@@ -275,7 +279,7 @@ int nn_windows(const float* sal, const Region* regs, int nreg,
 
 // ---- Stage 4: BNN (int8 FC1, deterministic) --------------------------------
 void nn_bnn(const float* crop, float* probs, float* box) {
-  conv3x3_same_relu(crop, 1, CROP, CROP, g_bnn.b1w, g_bnn.b1b, 40, b_f1);
+  conv3x3_same_relu(crop, N_CH, CROP, CROP, g_bnn.b1w, g_bnn.b1b, 40, b_f1);
   maxpool2(b_f1, 40, CROP, CROP, b_p1);                 // -> [40,14,14]
   conv3x3_same_relu(b_p1, 40, 14, 14, g_bnn.b2w, g_bnn.b2b, 80, b_f2);
   maxpool2(b_f2, 80, 14, 14, b_p2);                     // -> [80,7,7]

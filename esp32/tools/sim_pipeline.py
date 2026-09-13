@@ -6,8 +6,9 @@ gleiche Kette. Wer die Firmware liest, kann jede Funktion 1:1 gegen dieses
 Skript pruefen.
 
 Kette (ganze Struktur, wie vom Nutzer gefordert):
-  Kamera-Preprocessing : Graustufe -> Center-Crop (quadratisch) -> bilinear 128x128, /255
-  1+2. Conv+ANFIS      : ConvStack(1->8->4) -> TileStats(mean/max/var) ->
+  Kamera-Preprocessing : RGB565 -> RGB888 -> Center-Crop (quadratisch) ->
+                         bilinear 128x128, /255
+  1+2. Conv+ANFIS      : ConvStack(3->8->4) -> TileStats(mean/max/var) ->
                          Instanz-Norm ueber 64 Kacheln -> ANFIS(125 Regeln) ->
                          Sigmoid  => Saliency 8x8
   3.   Regionen        : Saliency >= REGION_THR -> Connected Components (4-Nachbar)
@@ -83,7 +84,7 @@ def load_saliency_blob(path):
     with open(path, "rb") as f:
         r = _Rd(f.read())
     P = {
-        "c1w": r.arr(F32, (8, 1, 3, 3)), "c1b": r.arr(F32, (8,)),
+        "c1w": r.arr(F32, (8, 3, 3, 3)), "c1b": r.arr(F32, (8,)),
         "c2w": r.arr(F32, (4, 8, 3, 3)), "c2b": r.arr(F32, (4,)),
         "c":   r.arr(F32, (3, 5)),
         "lgs": r.arr(F32, (3, 5)),
@@ -100,7 +101,7 @@ def load_bnn_blob(path):
     with open(path, "rb") as f:
         r = _Rd(f.read())
     P = {
-        "b1w": r.arr(F32, (40, 1, 3, 3)), "b1b": r.arr(F32, (40,)),
+        "b1w": r.arr(F32, (40, 3, 3, 3)), "b1b": r.arr(F32, (40,)),
         "b2w": r.arr(F32, (80, 40, 3, 3)), "b2b": r.arr(F32, (80,)),
         "fc1b": r.arr(F32, (192,)), "fc1s": r.arr(F32, (192,)),
         "fc1w8": r.arr(I8, (192, 3920)),
@@ -138,8 +139,8 @@ def pool2(x):
 
 
 def bilinear_resize(patch, size):
-    """Zentriertes bilineares Resize (2D) auf (size,size) - wie data_common.crop."""
-    h, w = patch.shape
+    """Zentriertes bilineares Resize (2D [H,W] oder 3D [H,W,C]) - wie data_common.crop."""
+    h, w = patch.shape[:2]
     ys = numpy.linspace(0, h - 1, size)
     xs = numpy.linspace(0, w - 1, size)
     y0 = numpy.floor(ys).astype(numpy.int64)
@@ -148,10 +149,20 @@ def bilinear_resize(patch, size):
     x1 = numpy.minimum(x0 + 1, w - 1)
     fy = (ys - y0)[:, None]
     fx = (xs - x0)[None, :]
-    v = (patch[y0, :][:, x0] * (1 - fy) * (1 - fx)
-         + patch[y0, :][:, x1] * (1 - fy) * fx
-         + patch[y1, :][:, x0] * fy * (1 - fx)
-         + patch[y1, :][:, x1] * fy * fx)
+
+    def _2d(pc, fy, fx, y0, y1, x0, x1):
+        return (pc[y0, :][:, x0] * (1 - fy) * (1 - fx)
+                + pc[y0, :][:, x1] * (1 - fy) * fx
+                + pc[y1, :][:, x0] * fy * (1 - fx)
+                + pc[y1, :][:, x1] * fy * fx)
+
+    if patch.ndim == 2:
+        v = _2d(patch, fy, fx, y0, y1, x0, x1)
+    else:
+        C = patch.shape[2]
+        v = numpy.empty((size, size, C), dtype=numpy.float64)
+        for c in range(C):
+            v[:, :, c] = _2d(patch[:, :, c], fy, fx, y0, y1, x0, x1)
     return v.astype(numpy.float32)
 
 
@@ -159,8 +170,8 @@ def bilinear_resize(patch, size):
 # Stufe 1+2: Saliency
 # ----------------------------------------------------------------------------
 def saliency_forward(P, scene):
-    """scene:[128,128] float 0..1 -> saliency [8,8] (Sigmoid-Wahrscheinlichkeit)."""
-    f1 = conv2d_same_relu(scene[None], P["c1w"], P["c1b"])   # [8,128,128]
+    """scene:[3,128,128] float 0..1 -> saliency [8,8] (Sigmoid-Wahrscheinlichkeit)."""
+    f1 = conv2d_same_relu(scene, P["c1w"], P["c1b"])   # [8,128,128]
     f2 = conv2d_same_relu(f1, P["c2w"], P["c2b"])            # [4,128,128]
 
     # Tile-Statistik: je 16x16-Kachel ueber [4,16,16]=1024 Werte
@@ -202,8 +213,8 @@ def saliency_forward(P, scene):
 # Stufe 4: BNN (int8-FC1, deterministisch S=1, Dropout AUS)
 # ----------------------------------------------------------------------------
 def bnn_forward(P, crop28):
-    """crop28:[28,28] float -> (probs[2], box[cx,cy,w,h] dekodiert)."""
-    f1 = conv2d_same_relu(crop28[None], P["b1w"], P["b1b"])   # [40,28,28]
+    """crop28:[3,28,28] float -> (probs[2], box[cx,cy,w,h] dekodiert)."""
+    f1 = conv2d_same_relu(crop28, P["b1w"], P["b1b"])   # [40,28,28]
     p1 = pool2(f1)                                            # [40,14,14]
     f2 = conv2d_same_relu(p1, P["b2w"], P["b2b"])             # [80,14,14]
     p2 = pool2(f2)                                            # [80,7,7]
@@ -506,35 +517,35 @@ def patches_for(img, sal, regs, mode, min_size, max_size, rng):
 # ----------------------------------------------------------------------------
 # Kamera-Preprocessing (spiegelt die Firmware)
 # ----------------------------------------------------------------------------
-def load_gray_scene(path, center_crop=True):
-    """Bild -> [128,128] float 0..1, Graustufe, optional Center-Crop quadratisch.
+def load_rgb_scene(path, center_crop=True):
+    """Bild -> [128,128,3] float 0..1 RGB, optional Center-Crop quadratisch.
 
-    Spiegelt die Firmware: Graustufen-Capture -> zentraler quadratischer
+    Spiegelt die Firmware: RGB565-Capture -> RGB888 -> zentraler quadratischer
     Ausschnitt -> bilinear 128x128 -> /255.
     """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".npy":
         arr = numpy.load(path).astype(numpy.float64)
-        if arr.ndim == 3:
-            arr = arr.mean(axis=2)
+        if arr.ndim == 2:                       # Graustufen -> 3 ident. Kanaele
+            arr = numpy.stack([arr] * 3, axis=2)
         if arr.max() > 1.5:
             arr = arr / 255.0
-        g = arr
+        rgb = arr[..., :3]
     else:
         try:
             from PIL import Image
         except ImportError:
-            sys.exit("Pillow fehlt: 'pip install pillow' oder .npy-Graustufenbild nutzen.")
-        im = Image.open(path).convert("L")
-        g = numpy.asarray(im, dtype=numpy.float64) / 255.0
+            sys.exit("Pillow fehlt: 'pip install pillow' oder .npy-Bild nutzen.")
+        im = Image.open(path).convert("RGB")
+        rgb = numpy.asarray(im, dtype=numpy.float64) / 255.0
 
     if center_crop:
-        h, w = g.shape
+        h, w = rgb.shape[:2]
         s = min(h, w)
         y0 = (h - s) // 2
         x0 = (w - s) // 2
-        g = g[y0:y0 + s, x0:x0 + s]
-    return bilinear_resize(g, SCENE).astype(numpy.float32)
+        rgb = rgb[y0:y0 + s, x0:x0 + s]
+    return bilinear_resize(rgb, SCENE).astype(numpy.float32)
 
 
 # ----------------------------------------------------------------------------
@@ -543,11 +554,12 @@ def load_gray_scene(path, center_crop=True):
 def run(args):
     salP = load_saliency_blob(os.path.join(MODELS_DIR, "face_saliency.bin"))
     bnnP = load_bnn_blob(os.path.join(MODELS_DIR, "face_bnn.bin"))
-    scene = load_gray_scene(args.image, center_crop=not args.no_center_crop)
+    scene = load_rgb_scene(args.image, center_crop=not args.no_center_crop)
+    scene_c = numpy.transpose(scene, (2, 0, 1))      # [3,128,128] fuer Conv
     rng = numpy.random.default_rng(args.seed)
 
     # ---- Saliency ----
-    sal = saliency_forward(salP, scene)
+    sal = saliency_forward(salP, scene_c)
     print(f"\n=== Saliency 8x8 (Schwelle REGION_THR={args.region_thr}) ===")
     print(f"  min={sal.min():.3f} max={sal.max():.3f} mean={sal.mean():.3f} "
           f"aktive Kacheln>=thr: {(sal >= args.region_thr).sum()}/64")
@@ -571,8 +583,9 @@ def run(args):
     for pi, (patch, ox, oy) in enumerate(patches):
         if patch.shape[0] < 4 or patch.shape[1] < 4:
             continue
-        H0, W0 = patch.shape
-        crop28 = bilinear_resize(patch, 28)
+        H0, W0 = patch.shape[0], patch.shape[1]
+        crop28_l = bilinear_resize(patch, 28)             # [28,28,3]
+        crop28 = numpy.transpose(crop28_l, (2, 0, 1))     # [3,28,28]
         probs, box = bnn_forward(bnnP, crop28)
         cls = int(numpy.argmax(probs))
         p_max = float(probs.max())
@@ -610,14 +623,13 @@ def run(args):
 
 
 def _save_annotated(scene, faces, out):
-    """Graustufen-Szene als RGB + gruene Boxen speichern (PIL)."""
+    """RGB-Szene + gruene Boxen speichern (PIL)."""
     try:
         from PIL import Image, ImageDraw
     except ImportError:
         print("Pillow fehlt - kein PNG gespeichert.")
         return
-    img = (numpy.clip(scene, 0, 1) * 255).astype(numpy.uint8)
-    rgb = numpy.stack([img, img, img], axis=2)
+    rgb = (numpy.clip(scene, 0, 1) * 255).astype(numpy.uint8)
     pim = Image.fromarray(rgb, "RGB")
     dr = ImageDraw.Draw(pim)
     for d in faces:

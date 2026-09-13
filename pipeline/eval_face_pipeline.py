@@ -14,7 +14,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from data_common import load_scene_split, boxes_iou
-from stage12 import ConvANFISSaliency
+from stage12 import ConvANFISSaliency, to_model_input
 from bnn import BNN
 from evaluate_pipeline import (_regions_from_saliency, _patches_for,
                                _crop_tensor)
@@ -24,6 +24,7 @@ MODELS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 SCENES = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "data", "wider_scenes")
 
+IN_CH = 3
 MC_S = 1
 REGION_THR = 0.5
 BNN_C1, BNN_C2, BNN_HID = 40, 80, 192
@@ -36,7 +37,7 @@ def _bnn_region(bnn, patch, device):
     cls = int(mu[0].argmax())
     p_max = float(mu[0].max())
     cx, cy, w, h = box_mu[0].numpy()
-    H0, W0 = patch.shape
+    H0, W0 = patch.shape[0], patch.shape[1]
     box = ((cx - w / 2) * W0, (cy - h / 2) * H0,
            (cx + w / 2) * W0, (cy + h / 2) * H0)
     return cls, p_max, box
@@ -103,11 +104,12 @@ def main():
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {dev}")
 
-    saliency = ConvANFISSaliency()
+    saliency = ConvANFISSaliency(in_ch=IN_CH)
     saliency.load_state_dict(torch.load(
         os.path.join(MODELS, "conv_anfis_saliency_face.pt"),
         map_location="cpu", weights_only=False)["model"])
-    bnn = BNN(n_class=2, box_head=True, c1=BNN_C1, c2=BNN_C2, hid=BNN_HID)
+    bnn = BNN(n_class=2, box_head=True, c1=BNN_C1, c2=BNN_C2, hid=BNN_HID,
+              in_ch=IN_CH)
     bnn.load_state_dict(torch.load(
         os.path.join(MODELS, "bnn_mc_box_face.pt"),
         map_location="cpu", weights_only=False)["model"])
@@ -118,7 +120,7 @@ def main():
 
     saliency.to(dev).eval()
     with torch.no_grad():
-        X = torch.from_numpy(imgs).unsqueeze(1).to(dev)
+        X = torch.from_numpy(to_model_input(imgs)).to(dev)
         sal_all = []
         for i in range(0, X.shape[0], 64):
             sal_all.append(torch.sigmoid(saliency(X[i:i + 64]))

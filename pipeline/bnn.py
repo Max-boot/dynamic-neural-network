@@ -26,10 +26,11 @@ class BNN(nn.Module):
     """Conv-MLP mit Dropout -> 11 Klassen; optional Box-Head; MC-Dropout."""
 
     def __init__(self, n_class=11, dropout=0.3, c1=24, c2=48, hid=96,
-                 box_head=True):
+                 box_head=True, in_ch=1):
         super().__init__()
         self.box_head_on = box_head
-        self.conv1 = nn.Conv2d(1, c1, 3, padding=1)
+        self.in_ch = in_ch
+        self.conv1 = nn.Conv2d(in_ch, c1, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(c1)
         self.conv2 = nn.Conv2d(c1, c2, 3, padding=1)
         self.bn2 = nn.BatchNorm2d(c2)

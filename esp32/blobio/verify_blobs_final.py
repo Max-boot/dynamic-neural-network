@@ -1,9 +1,9 @@
 """Blob-Paar-Verifikation face_saliency.bin + face_bnn.bin -> numpy vs torch.
 
 Layout laut export_esp32_face.py:
-  face_saliency.bin: c1w(8,1,3,3) c1b(8) c2w(4,8,3,3) c2b(4)
+  face_saliency.bin: c1w(8,3,3,3) c1b(8) c2w(4,8,3,3) c2b(4)
                      c(3,5) log_sigma(3,5) P(125,4)
-  face_bnn.bin:      c1w(40,1,3,3) c1b(40) c2w(80,40,3,3) c2b(80)
+  face_bnn.bin:      c1w(40,3,3,3) c1b(40) c2w(80,40,3,3) c2b(80)
                      fc1b(192) fc1s(192) fc1w8(192,3920) int8
                      fc2w(2,192) fc2b(2) fc3w(4,192) fc3b(4)
 """
@@ -17,7 +17,7 @@ import torch
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, os.path.join(_ROOT, "pipeline"))
-from stage12 import ConvANFISSaliency
+from stage12 import ConvANFISSaliency, to_model_input
 from bnn import BNN
 
 MODELS = os.path.join(_ROOT, "pipeline", "models")
@@ -42,7 +42,7 @@ class Rd:
 
 
 def conv2d_same(x, w, b):
-    """x:[B,1,H,W] -> out:[B,O,H,W]; Same-Pad, ReLU."""
+    """x:[B,C,H,W] -> out:[B,O,H,W]; Same-Pad, ReLU."""
     B, C, H, W = x.shape
     O = w.shape[0]
     xp = numpy.pad(x, ((0, 0), (0, 0), (1, 1), (1, 1)))
@@ -79,12 +79,12 @@ def fold_bn(w, b, bn):
 
 def main():
     # ---------- Torch-Referenz laden ----------
-    sal = ConvANFISSaliency()
+    sal = ConvANFISSaliency(in_ch=3)
     sal.load_state_dict(torch.load(os.path.join(MODELS, "conv_anfis_saliency_face.pt"),
                                    map_location="cpu",
                                    weights_only=False)["model"])
     sal.eval()
-    bnn = BNN(n_class=2, box_head=True, c1=40, c2=80, hid=192)
+    bnn = BNN(n_class=2, box_head=True, c1=40, c2=80, hid=192, in_ch=3)
     bnn.load_state_dict(torch.load(os.path.join(MODELS, "bnn_mc_box_face.pt"),
                                    map_location="cpu",
                                    weights_only=False)["model"])
@@ -94,7 +94,7 @@ def main():
     with open(os.path.join(OUT, "face_saliency.bin"), "rb") as f:
         sb = f.read()
     r = Rd(sb)
-    c1w = r.arr(F32, (8, 1, 3, 3)); c1b = r.arr(F32, (8,))
+    c1w = r.arr(F32, (8, 3, 3, 3)); c1b = r.arr(F32, (8,))
     c2w = r.arr(F32, (4, 8, 3, 3)); c2b = r.arr(F32, (4,))
     c = r.arr(F32, (3, 5)); lgs = r.arr(F32, (3, 5)); P = r.arr(F32, (125, 4))
     sig = numpy.log1p(numpy.exp(lgs))
@@ -104,11 +104,11 @@ def main():
     maxd_sal = 0.0
     t_sal_h = None
     for t in range(8):
-        scene = rng.random((128, 128)).astype(numpy.float32)
+        scene = rng.random((128, 128, 3)).astype(numpy.float32)
         with torch.no_grad():
             t_sal_h = torch.sigmoid(
-                sal(torch.from_numpy(scene[None, None]))).numpy().reshape(8, 8)
-        f1 = conv2d_same(scene[None, None], c1w, c1b)
+                sal(torch.from_numpy(to_model_input(scene[None])))).numpy().reshape(8, 8)
+        f1 = conv2d_same(to_model_input(scene[None]), c1w, c1b)
         f2 = conv2d_same(f1, c2w, c2b)
         stats = numpy.zeros((8, 8, 3))
         for j in range(8):
@@ -144,7 +144,7 @@ def main():
     with open(os.path.join(OUT, "face_bnn.bin"), "rb") as f:
         bb = f.read()
     r2 = Rd(bb)
-    b1w = r2.arr(F32, (40, 1, 3, 3)); b1b = r2.arr(F32, (40,))
+    b1w = r2.arr(F32, (40, 3, 3, 3)); b1b = r2.arr(F32, (40,))
     b2w = r2.arr(F32, (80, 40, 3, 3)); b2b = r2.arr(F32, (80,))
     fc1b = r2.arr(F32, (192,)); fc1s = r2.arr(F32, (192,))
     fc1w8 = r2.arr(I8S, (192, 3920))
@@ -167,16 +167,17 @@ def main():
     print(f"FC1-int8 vs round(w/fc1s): exakt={int8_exact} max|qdiff|={maxd_q:.2e} "
           f"scale-range [{fc1s.min():.2e},{fc1s.max():.2e}]")
     for t in range(16):
-        crop = rng.random((28, 28)).astype(numpy.float32)
+        crop = rng.random((28, 28, 3)).astype(numpy.float32)
         with torch.no_grad():
             # Deterministische Referenz: eval()-Forward (kein MC-Dropout),
             # identisch zu dem, was der ESP32 in float ausfuehrt.
-            t_logits, t_boxr = bnn(torch.from_numpy(crop[None, None]))
+            t_logits, t_boxr = bnn(
+                torch.from_numpy(to_model_input(crop[None])))
             t_logits = t_logits.numpy()[0]
             el = numpy.exp(t_logits - t_logits.max())
             t_logits = el / el.sum()
             t_box = decode_box(t_boxr.numpy()[0])
-        f1 = conv2d_same(crop[None, None], b1w, b1b)
+        f1 = conv2d_same(to_model_input(crop[None]), b1w, b1b)
         p1 = pool2(f1)
         f2 = conv2d_same(p1, b2w, b2b)
         p2 = pool2(f2)

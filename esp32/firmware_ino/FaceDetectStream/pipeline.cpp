@@ -8,7 +8,7 @@
 #include <freertos/semphr.h>
 
 // ---- shared buffers --------------------------------------------------------
-static float*   g_scene = nullptr;        // latest gray scene [SCENE*SCENE]
+static float*   g_scene = nullptr;        // latest RGB scene [N_CH*SCENE*SCENE]
 static bool     g_scene_ready = false;
 static SemaphoreHandle_t g_scene_mtx = nullptr;
 
@@ -28,7 +28,7 @@ static float* palloc(size_t n) {
 }
 
 bool shared_begin() {
-  g_scene = palloc(SCENE * SCENE);
+  g_scene = palloc(N_CH * SCENE * SCENE);
   g_jpeg  = (uint8_t*)heap_caps_malloc(JPEG_CAP, MALLOC_CAP_SPIRAM);
   if (!g_jpeg) g_jpeg = (uint8_t*)malloc(JPEG_CAP);
   g_scene_mtx = xSemaphoreCreateMutex();
@@ -42,7 +42,7 @@ bool shared_begin() {
 // ---- scene -----------------------------------------------------------------
 void shared_set_scene(const float* scene) {
   if (xSemaphoreTake(g_scene_mtx, portMAX_DELAY) == pdTRUE) {
-    memcpy(g_scene, scene, SCENE * SCENE * sizeof(float));
+    memcpy(g_scene, scene, N_CH * SCENE * SCENE * sizeof(float));
     g_scene_ready = true;
     xSemaphoreGive(g_scene_mtx);
   }
@@ -51,7 +51,7 @@ void shared_set_scene(const float* scene) {
 bool shared_get_scene(float* dst) {
   bool ok = false;
   if (xSemaphoreTake(g_scene_mtx, portMAX_DELAY) == pdTRUE) {
-    if (g_scene_ready) { memcpy(dst, g_scene, SCENE * SCENE * sizeof(float)); ok = true; }
+    if (g_scene_ready) { memcpy(dst, g_scene, N_CH * SCENE * SCENE * sizeof(float)); ok = true; }
     xSemaphoreGive(g_scene_mtx);
   }
   return ok;
@@ -104,8 +104,8 @@ static int argmax(const float* v, int n) {
 
 void inference_task(void* arg) {
   (void)arg;
-  float* scene = palloc(SCENE * SCENE);
-  float* crop  = palloc(CROP * CROP);
+  float* scene = palloc(N_CH * SCENE * SCENE);
+  float* crop  = palloc(N_CH * CROP * CROP);
   if (!scene || !crop) { Serial.println("[infer] alloc failed"); vTaskDelete(nullptr); return; }
 
   Region regs[N_TILES];

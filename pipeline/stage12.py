@@ -23,6 +23,18 @@ TILE = 16
 GRID = 8
 
 
+def to_model_input(imgs):
+    """Scene-Bilder -> [N,C,128,128] float32. Akzeptiert 2D [N,128,128] oder
+    Channel-nach-hinten [N,128,128,C] (RGB)."""
+    a = numpy.asarray(imgs, dtype=numpy.float32)
+    if a.ndim == 3:                      # [N,128,128] grayscale
+        return a[:, None, :, :]
+    if a.ndim == 4:                      # [N,128,128,C] channel-last
+        if a.shape[-1] in (1, 3):
+            return numpy.transpose(a, (0, 3, 1, 2))
+    raise ValueError(f"unexpected images shape {a.shape}")
+
+
 class ConvStack(nn.Module):
     """
     Feature-Extraktor: 128x128 -> [B, C, 128, 128].
@@ -70,10 +82,11 @@ class TileStats(nn.Module):
 
 
 class ConvANFISSaliency(nn.Module):
-    """Stage1+2 kombiniert: [B,1,128,128] -> saliency [B,GRID,GRID] (Logits)."""
-    def __init__(self, n_in=3, n_mf=5, sigma_init=0.9):
+    """Stage1+2 kombiniert: [B,C,128,128] -> saliency [B,GRID,GRID] (Logits)."""
+    def __init__(self, n_in=3, n_mf=5, sigma_init=0.9, in_ch=1):
         super().__init__()
-        self.conv_stack = ConvStack(in_ch=1, out_ch=4)
+        self.in_ch = in_ch
+        self.conv_stack = ConvStack(in_ch=in_ch, out_ch=4)
         self.tile_stats = TileStats()
         self.anfis = ANFIS(n_in=n_in, n_mf=n_mf,
                            center_range=(-3.0, 3.0), sigma_init=sigma_init)
@@ -106,7 +119,8 @@ def train_stage12(model, train_imgs, train_tiles, epochs=40, batch=64,
     model.to(device)
     pw = pos_weight_from(train_tiles).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
-    X = torch.from_numpy(train_imgs).unsqueeze(1).to(device)   # [N,1,128,128]
+    X0 = to_model_input(train_imgs)                        # [N,C,128,128]
+    X = torch.from_numpy(X0).to(device)
     Y = torch.from_numpy(train_tiles).reshape(X.shape[0], -1).float().to(device)  # [N,64]
     N = X.shape[0]
     losses = []
@@ -133,7 +147,8 @@ def eval_stage12(model, imgs, tiles, device="cuda"):
     """Tile-Level-Metriken: AUROC, AP, Recall@Precision==0.5."""
     from sklearn.metrics import roc_auc_score, average_precision_score
     model.to(device).eval()
-    X = torch.from_numpy(imgs).unsqueeze(1).to(device)
+    X0 = to_model_input(imgs)
+    X = torch.from_numpy(X0).to(device)
     Y = tiles
     preds = []
     bs = 128

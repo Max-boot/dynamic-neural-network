@@ -30,6 +30,7 @@ SCENES = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "data", "wider_scenes")
 
 C1, C2, HID = 40, 80, 192
+IN_CH = 3
 EPOCHS_S12 = 40
 EPOCHS_BNN = 70
 
@@ -121,7 +122,7 @@ def main():
           f"pos-rate={tr_tiles.mean():.3f}")
 
     torch.manual_seed(42)
-    saliency = ConvANFISSaliency()
+    saliency = ConvANFISSaliency(in_ch=IN_CH)
     losses = train_stage12(saliency, tr_imgs, tr_tiles, epochs=EPOCHS_S12,
                            batch=64, lr=1e-3, device=dev)
     te_met = eval_stage12(saliency, te_imgs, te_tiles, device=dev)
@@ -147,7 +148,8 @@ def main():
     print(f"BNN-Crops Train: {len(tr_ds)}  Val: {len(te_ds)}")
 
     torch.manual_seed(42)
-    bnn = BNN(n_class=2, dropout=0.3, box_head=True, c1=C1, c2=C2, hid=HID)
+    bnn = BNN(n_class=2, dropout=0.3, box_head=True, c1=C1, c2=C2, hid=HID,
+              in_ch=IN_CH)
     print("BNN-Parameter:", sum(p.numel() for p in bnn.parameters()))
     b_losses, b_accs, b_faccs, b_bhits = train_bnn_face(
         bnn, tr_ld, te_ld, epochs=EPOCHS_BNN, lr=1e-3, device=dev,

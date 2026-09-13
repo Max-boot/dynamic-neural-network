@@ -5,11 +5,11 @@ und sim_pipeline.py einlesen. Rekonstruiert aus der Spezifikation in
 esp32/blobio/verify_blobs_final.py + verify_bnn_quant_final.py.
 
 Layout (Byte-genau, wie von den Verify-Skripten geparst):
-  face_saliency.bin: c1w(8,1,3,3) c1b(8) c2w(4,8,3,3) c2b(4)
-                     c(3,5) log_sigma(3,5) P(125,4)                  -> 3608 B
-  face_bnn.bin:      c1w(40,1,3,3) c1b(40) c2w(80,40,3,3) c2b(80)
+  face_saliency.bin: c1w(8,3,3,3) c1b(8) c2w(4,8,3,3) c2b(4)
+                     c(3,5) log_sigma(3,5) P(125,4)                  -> 4184 B
+  face_bnn.bin:      c1w(40,3,3,3) c1b(40) c2w(80,40,3,3) c2b(80)
                      fc1b(192) fc1s(192) fc1w8(192,3920) int8
-                     fc2w(2,192) fc2b(2) fc3w(4,192) fc3b(4)         -> 875928 B
+                     fc2w(2,192) fc2b(2) fc3w(4,192) fc3b(4)         -> 878808 B
   Alles float32 in C-Reihenfolge, ausser fc1w8 (int8).
 
 WICHTIG - der behobene Bug:
@@ -68,8 +68,9 @@ SALIENCY_BIN = "face_saliency.bin"
 BNN_BIN = "face_bnn.bin"
 
 # Sanity: exakte Blob-Groessen, die Firmware/Skripte erwarten.
-SALIENCY_BYTES = 3608
-BNN_BYTES = 875928
+SALIENCY_BYTES = 4184
+BNN_BYTES = 878808
+IN_CH = 3
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +114,7 @@ def quant_fc1(weight):
 
 # ---------------------------------------------------------------------------
 def export_saliency(out_path):
-    sal = ConvANFISSaliency()
+    sal = ConvANFISSaliency(in_ch=IN_CH)
     sal.load_state_dict(_load_state(os.path.join(MODELS, SALIENCY_CKPT)))
     sal.eval()
 
@@ -132,7 +133,7 @@ def export_saliency(out_path):
 
 
 def export_bnn(out_path):
-    bnn = BNN(n_class=2, box_head=True, c1=40, c2=80, hid=192)
+    bnn = BNN(n_class=2, box_head=True, c1=40, c2=80, hid=192, in_ch=IN_CH)
     bnn.load_state_dict(_load_state(os.path.join(MODELS, BNN_CKPT)))
     bnn.eval()
 

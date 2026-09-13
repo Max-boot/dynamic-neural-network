@@ -48,6 +48,7 @@ github-export/
 pipeline/models/*.pt
 pipeline/models/*.pkl
 models/*.pt
+pipeline/models_posref/
 
 # Ergebnisse/Ausgaben
 pipeline/results/

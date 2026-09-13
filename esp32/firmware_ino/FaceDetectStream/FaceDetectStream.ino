@@ -2,9 +2,11 @@
 //  FaceDetectStream.ino  -  AI-Thinker ESP32-CAM face-detection livestream.
 //
 //  Architecture (dual core, FreeRTOS):
-//    Core 0  camera_task : owns the camera. Captures a grayscale QVGA frame,
-//            builds the 128x128 model scene, publishes it, reads the latest
-//            detections, upscales + draws boxes, JPEG-encodes, publishes JPEG.
+//    Core 0  camera_task : owns the camera. Captures a color QVGA frame (RGB565,
+//            but the OV2640 has no auto-color so it is nominal), builds the
+//            3-channel 128x128 model scene (R,G,B planes), publishes it, reads
+//            the latest detections, upscales + draws boxes, JPEG-encodes,
+//            publishes JPEG.
 //    Core 0  http server : streams the published JPEG as MJPEG (esp_http_server,
 //            pinned to core 0 in web.cpp).
 //    Core 1  inference_task : reads a scene snapshot, runs the full cascade
@@ -34,7 +36,7 @@
 // ---- display buffer (RGB888, upscaled scene the boxes are drawn on) --------
 #define DISP  (SCENE * STREAM_SCALE)          // 256
 static uint8_t* g_rgb = nullptr;              // [DISP*DISP*3]
-static float*   g_scene_local = nullptr;      // [SCENE*SCENE] scratch for capture
+static float*   g_scene_local = nullptr;      // [N_CH*SCENE*SCENE] scratch for capture
 static bool     g_model_ok = false;
 
 // ---- camera init -----------------------------------------------------------
@@ -51,8 +53,8 @@ static bool camera_init() {
   c.pin_sccb_sda = SIOD_GPIO_NUM; c.pin_sccb_scl = SIOC_GPIO_NUM;
   c.pin_pwdn = PWDN_GPIO_NUM;  c.pin_reset = RESET_GPIO_NUM;
   c.xclk_freq_hz = CAM_XCLK_HZ;
-  c.pixel_format = PIXFORMAT_GRAYSCALE;   // 1 byte/pixel, exactly what we need
-  c.frame_size   = FRAMESIZE_QVGA;        // 320x240
+  c.pixel_format = PIXFORMAT_RGB565;   // 2 bytes/pixel -> color model input (R,G,B)
+  c.frame_size   = FRAMESIZE_QVGA;     // 320x240
   c.fb_count     = 2;
   c.fb_location  = CAMERA_FB_IN_PSRAM;
   c.grab_mode    = CAMERA_GRAB_LATEST;
@@ -68,29 +70,46 @@ static bool camera_init() {
   return true;
 }
 
-// ---- scene build: grayscale frame -> center-cropped 128x128 float 0..1 -----
-// Mirrors sim_pipeline.load_gray_scene: center square crop, bilinear resize to
-// SCENE, /255. linspace(0, S-1, SCENE) sampling.
-static void build_scene(const uint8_t* g, int W, int H, float* scene) {
-  int S  = W < H ? W : H;                 // square side
-  int ox = (W - S) / 2;
-  int oy = (H - S) / 2;
+// ---- scene build: RGB565 frame -> center-cropped 128x128 float, 3 planes ----
+// Mirrors sim_pipeline.load_rgb_scene: center square crop, bilinear resize to
+// SCENE, /255. linspace(0, S-1, SCENE) sampling. Scene layout is channel-major
+// [R][G][B] planes, each [SCENE*SCENE] row-major, matching nn_saliency(C=N_CH).
+// RGB565 -> 0..255 exakte lineare Skalierung (255/31 bzw. 255/63 pro Bit):
+static void build_scene(const uint8_t* g8, int W, int H, float* scene) {
+  const uint16_t* g = (const uint16_t*)g8;    // little-endian host: byte0 = LSB
+  int S   = W < H ? W : H;                 // square side
+  int ox  = (W - S) / 2;
+  int oy  = (H - S) / 2;
   float step = (S > 1) ? (float)(S - 1) / (float)(SCENE - 1) : 0.0f;
   for (int j = 0; j < SCENE; j++) {
     float fy = j * step;
     int y0 = (int)fy; int y1 = y0 + 1; if (y1 > S - 1) y1 = S - 1;
     float wy = fy - y0;
-    const uint8_t* r0 = g + (oy + y0) * W + ox;
-    const uint8_t* r1 = g + (oy + y1) * W + ox;
+    const uint16_t* r0 = g + (oy + y0) * W + ox;
+    const uint16_t* r1 = g + (oy + y1) * W + ox;
     for (int i = 0; i < SCENE; i++) {
       float fx = i * step;
       int x0 = (int)fx; int x1 = x0 + 1; if (x1 > S - 1) x1 = S - 1;
       float wx = fx - x0;
-      float v = r0[x0] * (1 - wy) * (1 - wx)
-              + r0[x1] * (1 - wy) * wx
-              + r1[x0] * wy * (1 - wx)
-              + r1[x1] * wy * wx;
-      scene[j * SCENE + i] = v / 255.0f;
+      // 4 Ecken dekodieren und je Kanal bilinear interpolieren.
+      float rgb[3][4];                            // [channel][corner]
+      for (int q = 0; q < 4; q++) {
+        int col = (q & 1) ? x1 : x0;
+        int row = (q & 2) ? y1 : y0;
+        const uint16_t* px = (row == y0 ? r0 : r1) + col;
+        uint16_t p565 = *px;
+        float r8 = float((p565 >> 11) & 0x1F) * (255.0f / 31.0f);
+        float g8 = float((p565 >> 5)  & 0x3F) * (255.0f / 63.0f);
+        float b8 = float((p565)       & 0x1F) * (255.0f / 31.0f);
+        rgb[0][q] = r8; rgb[1][q] = g8; rgb[2][q] = b8;
+      }
+      for (int c = 0; c < N_CH; c++) {
+        float w00 = (1 - wx) * (1 - wy), w01 = wx * (1 - wy);
+        float w10 = (1 - wx) * wy,      w11 = wx * wy;
+        float v = rgb[c][0] * w00 + rgb[c][1] * w01
+                + rgb[c][2] * w10 + rgb[c][3] * w11;
+        scene[c * SCENE * SCENE + j * SCENE + i] = v / 255.0f;
+      }
     }
   }
 }
@@ -110,14 +129,16 @@ static void draw_rect(int x0, int y0, int x1, int y1, uint8_t r, uint8_t gg, uin
 }
 
 static void render_frame(const float* scene, const Detection* d, int nd) {
-  // Upscale grayscale scene -> RGB888 display buffer (nearest neighbour).
+  // Upscale RGB scene ([N_CH*SCENE*SCENE], planes R,G,B) -> RGB888 display (nearest).
   for (int y = 0; y < DISP; y++) {
     int sy = y / STREAM_SCALE;
     for (int x = 0; x < DISP; x++) {
       int sx = x / STREAM_SCALE;
-      uint8_t v = (uint8_t)(scene[sy * SCENE + sx] * 255.0f + 0.5f);
       uint8_t* p = g_rgb + (y * DISP + x) * 3;
-      p[0] = v; p[1] = v; p[2] = v;
+      for (int c = 0; c < 3; c++) {
+        float v = scene[c * SCENE * SCENE + sy * SCENE + sx];
+        p[c] = (uint8_t)(v * 255.0f + 0.5f);
+      }
     }
   }
   // Boxes: green for FACE_CLASS, orange otherwise. Coords are scene units.
@@ -188,7 +209,7 @@ void setup() {
 
   // Display + capture scratch (PSRAM).
   g_rgb = (uint8_t*)heap_caps_malloc(DISP * DISP * 3, MALLOC_CAP_SPIRAM);
-  g_scene_local = (float*)heap_caps_malloc(SCENE * SCENE * sizeof(float), MALLOC_CAP_SPIRAM);
+  g_scene_local = (float*)heap_caps_malloc(N_CH * SCENE * SCENE * sizeof(float), MALLOC_CAP_SPIRAM);
   if (!g_rgb || !g_scene_local) { Serial.println("[boot] FATAL: scratch alloc"); }
 
   if (!camera_init())  Serial.println("[boot] camera init FAILED");

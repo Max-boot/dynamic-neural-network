@@ -1,5 +1,5 @@
 """
-Datensatz fuer das Gesichts-BNN (Stay 4+5): 1 Objektklasse (Gesicht) + Box.
+Datensatz fuer das Gesichts-BNN (Stufe 4+5): 1 Objektklasse (Gesicht) + Box.
 
 Crop-Verteilung identisch zur MNIST-Pipeline: Fenster/Tile/negative Samples
 aus 128x128-Szenen, bilinear auf 28x28 resized. Klassen:
@@ -134,7 +134,7 @@ def normalize_boxes(items, n):
 
 def build_face_datasets(seed=42, base=None, max_pos_window=3, max_pos_tile=3,
                         neg_per_img=6):
-    """Train/Test-Tensordatasets (x[1,28,28], y_cls[2], y_box[4])."""
+    """Train/Test-Tensordatasets (x[3,28,28], y_cls[2], y_box[4])."""
     if base is None:
         base = os.path.join(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__))), "data", "wider_scenes")
@@ -158,6 +158,8 @@ def build_face_datasets(seed=42, base=None, max_pos_window=3, max_pos_tile=3,
 
     def pack(xs, ys, bs):
         X = numpy.stack(xs).astype(numpy.float32)
+        if X.ndim == 4:                    # [N,28,28,C] channel-last -> [N,C,28,28]
+            X = numpy.transpose(X, (0, 3, 1, 2))
         Y = numpy.asarray(ys, dtype=numpy.int64)
         B = normalize_boxes(bs, len(Y))
         B[Y == BG_CLASS] = (0.5, 0.5, 0.0, 0.0)
@@ -167,9 +169,9 @@ def build_face_datasets(seed=42, base=None, max_pos_window=3, max_pos_tile=3,
                             tr_wb + tr_tb + tr_nb)
     X_te, y_te, b_te = pack(te_wx + te_tx + te_nx, te_ws + te_ts + te_ns,
                             te_wb + te_tb + te_nb)
-    return (TensorDataset(torch.from_numpy(X_tr).unsqueeze(1),
+    return (TensorDataset(torch.from_numpy(X_tr),
                           torch.from_numpy(y_tr), torch.from_numpy(b_tr)),
-            TensorDataset(torch.from_numpy(X_te).unsqueeze(1),
+            TensorDataset(torch.from_numpy(X_te),
                           torch.from_numpy(y_te), torch.from_numpy(b_te)))
 
 
