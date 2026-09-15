@@ -2,7 +2,7 @@
 //  web.cpp  -  esp_http_server endpoints.
 //
 //    GET  /            HTML page: <img> onto the MJPEG stream + upload form.
-//    GET  /stream      multipart/x-mixed-replace MJPEG (the overlaid frames).
+//    GET  /stream      multipart/x-mixed-replace MJPEG (overlaid with boxes).
 //    GET  /status      JSON: model loaded?, heap, psram, ip.
 //    POST /upload?path=/face_bnn.bin   raw body -> LittleFS (chunked, streamed).
 //
@@ -88,7 +88,7 @@ static esp_err_t stream_handler(httpd_req_t* req) {
   httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
 
   // Local scratch to snapshot the shared JPEG without holding the mutex during send.
-  const size_t CAP = 48 * 1024;
+  const size_t CAP = 64 * 1024;
   uint8_t* buf = (uint8_t*)heap_caps_malloc(CAP, MALLOC_CAP_SPIRAM);
   if (!buf) buf = (uint8_t*)malloc(CAP);
   if (!buf) return ESP_FAIL;

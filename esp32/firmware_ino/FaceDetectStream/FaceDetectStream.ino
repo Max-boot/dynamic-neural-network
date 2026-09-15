@@ -2,11 +2,10 @@
 //  FaceDetectStream.ino  -  AI-Thinker ESP32-CAM face-detection livestream.
 //
 //  Architecture (dual core, FreeRTOS):
-//    Core 0  camera_task : owns the camera. Captures a color QVGA frame (RGB565,
-//            but the OV2640 has no auto-color so it is nominal), builds the
-//            3-channel 128x128 model scene (R,G,B planes), publishes it, reads
-//            the latest detections, upscales + draws boxes, JPEG-encodes,
-//            publishes JPEG.
+//    Core 0  camera_task : owns the camera. Captures a QVGA JPEG frame
+//            (PIXFORMAT_JPEG, hardware-encoded), decodes to RGB888, builds the
+//            3-channel 128x128 model scene, draws detection boxes on the
+//            RGB888 buffer, encodes back to JPEG, publishes for streaming.
 //    Core 0  http server : streams the published JPEG as MJPEG (esp_http_server,
 //            pinned to core 0 in web.cpp).
 //    Core 1  inference_task : reads a scene snapshot, runs the full cascade
@@ -33,10 +32,9 @@
 #include "pipeline.h"
 #include "web.h"
 
-// ---- display buffer (RGB888, upscaled scene the boxes are drawn on) --------
-#define DISP  (SCENE * STREAM_SCALE)          // 256
-static uint8_t* g_rgb = nullptr;              // [DISP*DISP*3]
-static float*   g_scene_local = nullptr;      // [N_CH*SCENE*SCENE] scratch for capture
+// ---- decode scratch: camera JPEG -> RGB888 (QVGA 320x240), model input ----
+static uint8_t* g_rgb888 = nullptr;         // [CAM_W*CAM_H*3]
+static float*   g_scene_local = nullptr;    // [N_CH*SCENE*SCENE] scratch for capture
 static bool     g_model_ok = false;
 
 // ---- camera init -----------------------------------------------------------
@@ -53,60 +51,55 @@ static bool camera_init() {
   c.pin_sccb_sda = SIOD_GPIO_NUM; c.pin_sccb_scl = SIOC_GPIO_NUM;
   c.pin_pwdn = PWDN_GPIO_NUM;  c.pin_reset = RESET_GPIO_NUM;
   c.xclk_freq_hz = CAM_XCLK_HZ;
-  c.pixel_format = PIXFORMAT_RGB565;   // 2 bytes/pixel -> color model input (R,G,B)
-  c.frame_size   = FRAMESIZE_QVGA;     // 320x240
-  c.fb_count     = 2;
-  c.fb_location  = CAMERA_FB_IN_PSRAM;
-  c.grab_mode    = CAMERA_GRAB_LATEST;
+  c.pixel_format    = PIXFORMAT_JPEG;        // HARDWARE JPEG encode, no fmt2jpg
+  c.frame_size      = FRAMESIZE_QVGA;        // 320x240
+  c.jpeg_quality    = JPEG_QUALITY;
+  c.fb_count        = 2;
+  c.fb_location     = CAMERA_FB_IN_PSRAM;
+  c.grab_mode       = CAMERA_GRAB_LATEST;
 
   esp_err_t err = esp_camera_init(&c);
   if (err != ESP_OK) { Serial.printf("[cam] init failed 0x%x\n", err); return false; }
 
   sensor_t* s = esp_camera_sensor_get();
   if (s) {
-    s->set_vflip(s, 0);
+    // Kamera ist physisch kopfüber montiert. Statt die Szene software-seitig
+    // zu spiegeln, flippt der Sensor direkt -> JPEG, Scene und Boxen sind
+    // identisch ausgerichtet, render_frame mappt 1:1.
+    s->set_vflip(s, 1);
     s->set_hmirror(s, 0);
   }
   return true;
 }
 
-// ---- scene build: RGB565 frame -> center-cropped 128x128 float, 3 planes ----
+// ---- scene build: RGB888 frame -> center-cropped 128x128 float, 3 planes ----
 // Mirrors sim_pipeline.load_rgb_scene: center square crop, bilinear resize to
 // SCENE, /255. linspace(0, S-1, SCENE) sampling. Scene layout is channel-major
 // [R][G][B] planes, each [SCENE*SCENE] row-major, matching nn_saliency(C=N_CH).
-// Die Szene wird vertikal gespiegelt (Kamera kopfüber montiert); Rendering und
-// Detektion arbeiten dann konsistent auf der gespiegelten Szene.
-// RGB565 -> 0..255 exakte lineare Skalierung (255/31 bzw. 255/63 pro Bit).
-// Byte-Reihenfolge der OV2640-RGB565-Frames ist big-endian und matcht
-// fmt2rgb888: p565 = (buf[0]<<8) | buf[1], wobei B die oberen 5 Bit (p>>11),
-// G die mittleren 6 Bit ((p>>5)&0x3F) und R die unteren 5 Bit (p&0x1F) traegt.
-// Ein uint16_t*-Cast wuerde little-endian lesen (charakteristische Farbfraktale).
+// Input is the fmt2rgb888-decoded camera JPEG (<-> sensor, already vflip=1 so
+// no manual mirror here).
 static void build_scene(const uint8_t* g8, int W, int H, float* scene) {
   int S   = W < H ? W : H;                 // square side
   int ox  = (W - S) / 2;
   int oy  = (H - S) / 2;
   float step = (S > 1) ? (float)(S - 1) / (float)(SCENE - 1) : 0.0f;
   for (int j = 0; j < SCENE; j++) {
-    // Kamera ist kopfüber montiert: Szene vertikal spiegeln (oben<->unten).
-    // Wiederholte Abtastposition ergibt exakt den gespiegelten Bilinear-Wert.
-    float fy = (float)(S - 1) - j * step;
+    float fy = j * step;
     int y0 = (int)fy; int y1 = y0 + 1; if (y1 > S - 1) y1 = S - 1;
     float wy = fy - y0;
     for (int i = 0; i < SCENE; i++) {
       float fx = i * step;
       int x0 = (int)fx; int x1 = x0 + 1; if (x1 > S - 1) x1 = S - 1;
       float wx = fx - x0;
-      // 4 Ecken dekodieren und je Kanal bilinear interpolieren.
+      // 4 Ecken lesen (RGB888) und je Kanal bilinear interpolieren.
       float rgb[3][4];                            // [channel][corner]
       for (int q = 0; q < 4; q++) {
         int col = (q & 1) ? x1 : x0;
         int row = (q & 2) ? y1 : y0;
-        const uint8_t* px = g8 + ((oy + row) * W + ox + col) * 2;  // 2 B/px
-        uint16_t p565 = (uint16_t)(px[0] << 8) | px[1];   // high byte zuerst
-        float b8 = float((p565 >> 11) & 0x1F) * (255.0f / 31.0f);
-        float g8 = float((p565 >> 5)  & 0x3F) * (255.0f / 63.0f);
-        float r8 = float((p565)       & 0x1F) * (255.0f / 31.0f);
-        rgb[0][q] = r8; rgb[1][q] = g8; rgb[2][q] = b8;
+        const uint8_t* px = g8 + ((oy + row) * W + ox + col) * 3;  // 3 B/px
+        rgb[0][q] = (float)px[0];
+        rgb[1][q] = (float)px[1];
+        rgb[2][q] = (float)px[2];
       }
       for (int c = 0; c < N_CH; c++) {
         float w00 = (1 - wx) * (1 - wy), w01 = wx * (1 - wy);
@@ -119,45 +112,59 @@ static void build_scene(const uint8_t* g8, int W, int H, float* scene) {
   }
 }
 
-// ---- overlay ---------------------------------------------------------------
-static inline void putpx(int x, int y, uint8_t r, uint8_t gg, uint8_t b) {
-  if (x < 0 || x >= DISP || y < 0 || y >= DISP) return;
-  uint8_t* p = g_rgb + (y * DISP + x) * 3;
+// ---- overlay on the decoded RGB888 frame (QVGA 320x240) -------------------
+static inline void putpx(uint8_t* rgb, int W, int H, int x, int y,
+                         uint8_t r, uint8_t gg, uint8_t b) {
+  if (x < 0 || x >= W || y < 0 || y >= H) return;
+  uint8_t* p = rgb + (y * W + x) * 3;
   p[0] = r; p[1] = gg; p[2] = b;
 }
 
-static void draw_rect(int x0, int y0, int x1, int y1, uint8_t r, uint8_t gg, uint8_t b) {
+static void draw_rect(uint8_t* rgb, int W, int H,
+                      int x0, int y0, int x1, int y1,
+                      uint8_t r, uint8_t gg, uint8_t b) {
   for (int t = 0; t < 2; t++) {              // 2px thick
-    for (int x = x0; x <= x1; x++) { putpx(x, y0 + t, r, gg, b); putpx(x, y1 - t, r, gg, b); }
-    for (int y = y0; y <= y1; y++) { putpx(x0 + t, y, r, gg, b); putpx(x1 - t, y, r, gg, b); }
+    for (int x = x0; x <= x1; x++) { putpx(rgb, W, H, x, y0 + t, r, gg, b); putpx(rgb, W, H, x, y1 - t, r, gg, b); }
+    for (int y = y0; y <= y1; y++) { putpx(rgb, W, H, x0 + t, y, r, gg, b); putpx(rgb, W, H, x1 - t, y, r, gg, b); }
   }
 }
 
-static void render_frame(const float* scene, const Detection* d, int nd) {
-  // Upscale RGB scene ([N_CH*SCENE*SCENE], planes R,G,B) -> RGB888 display (nearest).
-  for (int y = 0; y < DISP; y++) {
-    int sy = y / STREAM_SCALE;
-    for (int x = 0; x < DISP; x++) {
-      int sx = x / STREAM_SCALE;
-      uint8_t* p = g_rgb + (y * DISP + x) * 3;
-      for (int c = 0; c < 3; c++) {
-        float v = scene[c * SCENE * SCENE + sy * SCENE + sx];
-        p[c] = (uint8_t)(v * 255.0f + 0.5f);
-      }
-    }
-  }
-  // Boxes: green for FACE_CLASS, orange otherwise. Coords are scene units.
+// Boxes are in scene units (0..SCENE); map to camera pixels exactly like
+// build_scene: center square crop at (ox,oy) of side S, step=(S-1)/(SCENE-1).
+static void render_frame(uint8_t* rgb, int W, int H, const Detection* d, int nd) {
+  int S   = W < H ? W : H;
+  int ox  = (W - S) / 2;
+  int oy  = (H - S) / 2;
+  float step = (S > 1) ? (float)(S - 1) / (float)(SCENE - 1) : 0.0f;
+
   for (int i = 0; i < nd; i++) {
-    int x0 = (int)(d[i].x0 * STREAM_SCALE + 0.5f);
-    int y0 = (int)(d[i].y0 * STREAM_SCALE + 0.5f);
-    int x1 = (int)(d[i].x1 * STREAM_SCALE + 0.5f);
-    int y1 = (int)(d[i].y1 * STREAM_SCALE + 0.5f);
-    if (d[i].cls == FACE_CLASS) draw_rect(x0, y0, x1, y1, 0, 255, 0);
-    else                        draw_rect(x0, y0, x1, y1, 255, 160, 0);
+    int x0 = ox + (int)(d[i].x0 * step + 0.5f);
+    int y0 = oy + (int)(d[i].y0 * step + 0.5f);
+    int x1 = ox + (int)(d[i].x1 * step + 0.5f);
+    int y1 = oy + (int)(d[i].y1 * step + 0.5f);
+    if (d[i].cls == FACE_CLASS) draw_rect(rgb, W, H, x0, y0, x1, y1, 0, 255, 0);
+    else                        draw_rect(rgb, W, H, x0, y0, x1, y1, 255, 160, 0);
   }
 }
 
 // ---- camera task (core 0) --------------------------------------------------
+// The stream must show a PERSISTENT box while a detection exists. That is only
+// possible if frames without a box are published as raw camera JPEG and frames
+// WITH a box are published as the drawn+re-encoded JPEG. Two subtleties:
+//   * never publish the raw frame first and the drawn one later, otherwise the
+//     next loop's raw publish instantly erases the box (flicker);
+//   * the camera FB is held until the last use (fb_return after the branch).
+//
+// fmt2rgb888 in this esp32-camera build emits BGR for a JPEG source while
+// build_scene and fmt2jpg both expect RGB. The raw fast path is unaffected
+// (native camera JPEG), but the re-encode path would swap R<->B (red tones
+// turn blue, green boxes stay green because 0,255,0 is symmetric). Fix: swap
+// channels 0<->2 once after the decode so scene + stream use correct RGB.
+static void bgr_to_rgb(uint8_t* buf, size_t npix) {
+  for (size_t i = 0; i < npix; i++, buf += 3) {
+    uint8_t t = buf[0]; buf[0] = buf[2]; buf[2] = t;
+  }
+}
 static void camera_task(void* arg) {
   (void)arg;
   Detection dets[MAX_DETS];
@@ -167,24 +174,41 @@ static void camera_task(void* arg) {
     camera_fb_t* fb = esp_camera_fb_get();
     if (!fb) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
 
-    build_scene(fb->buf, fb->width, fb->height, g_scene_local);
-    esp_camera_fb_return(fb);
+    // Model input: JPEG -> RGB888 decode (fb still held for the raw path).
+    fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, g_rgb888);
+    bgr_to_rgb(g_rgb888, CAM_W * CAM_H);
 
+    build_scene(g_rgb888, CAM_W, CAM_H, g_scene_local);
     shared_set_scene(g_scene_local);
 
     int nd = shared_get_dets(dets, MAX_DETS);
-    render_frame(g_scene_local, dets, nd);
-
     unsigned long tc1 = millis();
-    uint8_t* jpg = nullptr; size_t jlen = 0;
-    if (fmt2jpg(g_rgb, DISP * DISP * 3, DISP, DISP, PIXFORMAT_RGB888, JPEG_QUALITY, &jpg, &jlen)) {
-      shared_set_jpeg(jpg, jlen);
-      free(jpg);
-    }
-    unsigned long tc2 = millis();
-    cam_cnt++;
-    if ((cam_cnt & 0x1F) == 0) {
-      Serial.printf("[cam] scene=%lu jpg=%lu total=%lu dets=%d\n", tc1-tc0, tc2-tc1, tc2-tc0, nd);
+    if (nd > 0) {
+      // Face present: draw boxes on the decoded RGB888 and re-encode. The
+      // overlaid JPEG is the ONLY frame published this loop -> box persists.
+      render_frame(g_rgb888, CAM_W, CAM_H, dets, nd);
+      esp_camera_fb_return(fb);
+
+      uint8_t* jpg = nullptr; size_t jlen = 0;
+      if (fmt2jpg(g_rgb888, CAM_W * CAM_H * 3, CAM_W, CAM_H, PIXFORMAT_RGB888, JPEG_QUALITY, &jpg, &jlen)) {
+        shared_set_jpeg(jpg, jlen);
+        free(jpg);
+      }
+      unsigned long tc2 = millis();
+      cam_cnt++;
+      if ((cam_cnt & 0x1F) == 0) {
+        Serial.printf("[cam] decode+scene=%lu jpg=%lu total=%lu dets=%d\n",
+                      tc1-tc0, tc2-tc1, tc2-tc0, nd);
+      }
+    } else {
+      // No face: stream the camera's OWN hardware JPEG, zero software encode.
+      shared_set_jpeg(fb->buf, fb->len);
+      esp_camera_fb_return(fb);
+
+      cam_cnt++;
+      if ((cam_cnt & 0x1F) == 0) {
+        Serial.printf("[cam] cap+dec=%lu total=%lu dets=0 (fast path)\n", tc1-tc0, millis()-tc0);
+      }
     }
     vTaskDelay(pdMS_TO_TICKS(1));
   }
@@ -220,10 +244,10 @@ void setup() {
 
   if (!psramFound()) { Serial.println("[boot] FATAL: no PSRAM"); }
 
-  // Display + capture scratch (PSRAM).
-  g_rgb = (uint8_t*)heap_caps_malloc(DISP * DISP * 3, MALLOC_CAP_SPIRAM);
+  // Decode scratch (camera JPEG -> RGB888, QVGA) + capture scratch (PSRAM).
+  g_rgb888 = (uint8_t*)heap_caps_malloc(CAM_W * CAM_H * 3, MALLOC_CAP_SPIRAM);
   g_scene_local = (float*)heap_caps_malloc(N_CH * SCENE * SCENE * sizeof(float), MALLOC_CAP_SPIRAM);
-  if (!g_rgb || !g_scene_local) { Serial.println("[boot] FATAL: scratch alloc"); }
+  if (!g_rgb888 || !g_scene_local) { Serial.println("[boot] FATAL: scratch alloc"); }
 
   if (!camera_init())  Serial.println("[boot] camera init FAILED");
   if (!storage_begin()) Serial.println("[boot] storage init FAILED");

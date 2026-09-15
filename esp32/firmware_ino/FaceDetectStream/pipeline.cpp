@@ -16,7 +16,7 @@ static Detection g_dets[MAX_DETS];
 static int       g_ndets = 0;
 static SemaphoreHandle_t g_dets_mtx = nullptr;
 
-#define JPEG_CAP (48 * 1024)              // generous ceiling for one frame
+#define JPEG_CAP (64 * 1024)              // roomy for a hardware-QVGA frame
 static uint8_t* g_jpeg = nullptr;
 static size_t   g_jpeg_len = 0;
 static SemaphoreHandle_t g_jpeg_mtx = nullptr;

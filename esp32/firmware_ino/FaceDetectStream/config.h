@@ -117,6 +117,9 @@
 // ---------------------------------------------------------------------------
 // Streaming
 // ---------------------------------------------------------------------------
-#define JPEG_QUALITY      12     // 0..63, lower = better quality / bigger
-#define STREAM_SCALE      2      // output JPEG is SCENE*STREAM_SCALE per side
+// JPEG_QUALITY goes to the OV2640 HARDWARE encoder (camera produces the JPEG
+// directly, no software fmt2jpg). Lower = better quality / bigger frame.
+#define JPEG_QUALITY      12
 #define CAM_XCLK_HZ       20000000
+#define CAM_W             320              // QVGA, must match FRAMESIZE_QVGA
+#define CAM_H             240
