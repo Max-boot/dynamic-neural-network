@@ -525,16 +525,7 @@ void nn_bnn(const float* crop, float* probs, float* box) {
   for (int o = 0; o < N_CLASS; o++) { probs[o] = expf(logit[o] - mx); sum += probs[o]; }
   for (int o = 0; o < N_CLASS; o++) probs[o] /= sum;
 
-  // FC3 -> raw box -> decode (cx=sig, cy=sig, w=exp, h=exp).
-  float raw[4];
-  for (int o = 0; o < 4; o++) {
-    const float* wr = g_bnn.fc3w + o * 192;
-    float acc = g_bnn.fc3b[o];
-    for (int k = 0; k < 192; k++) acc += wr[k] * h[k];
-    raw[o] = acc;
-  }
-  box[0] = 1.0f / (1.0f + expf(-raw[0]));
-  box[1] = 1.0f / (1.0f + expf(-raw[1]));
-  box[2] = expf(raw[2]);
-  box[3] = expf(raw[3]);
+  // Student BNN: no box head (fc3) -- the box is the adaptive saliency window
+  // itself. Normalized coords: center (0.5,0.5), size 1x1 of the window.
+  box[0] = 0.5f; box[1] = 0.5f; box[2] = 1.0f; box[3] = 1.0f;
 }
