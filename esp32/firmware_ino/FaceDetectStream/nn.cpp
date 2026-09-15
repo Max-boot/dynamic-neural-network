@@ -14,10 +14,10 @@
 // ---- PSRAM scratch ---------------------------------------------------------
 static float* s_f1 = nullptr;   // [8,128,128]
 static float* s_f2 = nullptr;   // [4,128,128]
-static float* b_f1 = nullptr;   // [40,28,28]
-static float* b_p1 = nullptr;   // [40,14,14]
-static float* b_f2 = nullptr;   // [80,14,14]
-static float* b_p2 = nullptr;   // [80,7,7]
+static float* b_f1 = nullptr;   // [BNN_C1,28,28]
+static float* b_p1 = nullptr;   // [BNN_C1,14,14]
+static float* b_f2 = nullptr;   // [BNN_C2,14,14]
+static float* b_p2 = nullptr;   // [BNN_C2,7,7]
 
 static float* palloc(size_t n) {
   float* p = (float*)heap_caps_malloc(n * sizeof(float), MALLOC_CAP_SPIRAM);
@@ -28,10 +28,10 @@ static float* palloc(size_t n) {
 bool nn_begin() {
   s_f1 = palloc(8 * SCENE * SCENE);
   s_f2 = palloc(4 * SCENE * SCENE);
-  b_f1 = palloc(40 * CROP * CROP);
-  b_p1 = palloc(40 * 14 * 14);
-  b_f2 = palloc(80 * 14 * 14);
-  b_p2 = palloc(80 * 7 * 7);
+  b_f1 = palloc(BNN_C1 * CROP * CROP);
+  b_p1 = palloc(BNN_C1 * 14 * 14);
+  b_f2 = palloc(BNN_C2 * 14 * 14);
+  b_p2 = palloc(BNN_C2 * 7 * 7);
   bool ok = s_f1 && s_f2 && b_f1 && b_p1 && b_f2 && b_p2;
   if (!ok) Serial.println("[nn] scratch alloc failed");
   return ok;
@@ -495,15 +495,15 @@ int nn_windows(const float* sal, const Region* regs, int nreg,
 
 // ---- Stage 4: BNN (int8 FC1, deterministic) --------------------------------
 void nn_bnn(const float* crop, float* probs, float* box) {
-  conv3x3_same_relu(crop, N_CH, CROP, CROP, g_bnn.b1w, g_bnn.b1b, 40, b_f1);
-  maxpool2(b_f1, 40, CROP, CROP, b_p1);                 // -> [40,14,14]
-  conv3x3_same_relu(b_p1, 40, 14, 14, g_bnn.b2w, g_bnn.b2b, 80, b_f2);
-  maxpool2(b_f2, 80, 14, 14, b_p2);                     // -> [80,7,7]
-  const float* flat = b_p2;                             // 3920, C-order
+  conv3x3_same_relu(crop, N_CH, CROP, CROP, g_bnn.b1w, g_bnn.b1b, BNN_C1, b_f1);
+  maxpool2(b_f1, BNN_C1, CROP, CROP, b_p1);                 // -> [BNN_C1,14,14]
+  conv3x3_same_relu(b_p1, BNN_C1, 14, 14, g_bnn.b2w, g_bnn.b2b, BNN_C2, b_f2);
+  maxpool2(b_f2, BNN_C2, 14, 14, b_p2);                     // -> [BNN_C2,7,7]
+  const float* flat = b_p2;                             // BNN_FLAT, C-order
 
   // FC1 (int8): h[r] = relu( sum_k flat[k]*W8[r][k] * fc1s[r] + fc1b[r] ).
-  float h[192];
-  for (int r = 0; r < 192; r++) {
+  float h[BNN_HIDDEN];
+  for (int r = 0; r < BNN_HIDDEN; r++) {
     const int8_t* wr = g_bnn.fc1w8 + (size_t)r * BNN_FLAT;
     float acc = 0.0f;
     for (int k = 0; k < BNN_FLAT; k++) acc += flat[k] * (float)wr[k];
@@ -514,9 +514,9 @@ void nn_bnn(const float* crop, float* probs, float* box) {
   // FC2 -> logits -> softmax.
   float logit[N_CLASS];
   for (int o = 0; o < N_CLASS; o++) {
-    const float* wr = g_bnn.fc2w + o * 192;
+    const float* wr = g_bnn.fc2w + o * BNN_HIDDEN;
     float acc = g_bnn.fc2b[o];
-    for (int k = 0; k < 192; k++) acc += wr[k] * h[k];
+    for (int k = 0; k < BNN_HIDDEN; k++) acc += wr[k] * h[k];
     logit[o] = acc;
   }
   float mx = logit[0];

@@ -29,7 +29,7 @@
 #define BNN_PATH          "/face_bnn.bin"
 #define SALIENCY_BYTES    2964                 // sanity-check sizes on load
                                                // (MLP head: conv 8/4ch + fc 12-16-1)
-#define BNN_BYTES         878808
+#define BNN_BYTES         227112                // student blob (no box head)
 
 // ---------------------------------------------------------------------------
 // Pipeline geometry (fixed by the trained model -- do NOT change)
@@ -41,7 +41,10 @@
 #define N_TILES           64     // GRID * GRID
 #define CROP              28     // BNN input side
 #define N_CLASS           2      // face model: 2 logits
-#define BNN_FLAT          3920   // 80 * 7 * 7
+#define BNN_C1            24     // conv1 output channels (student: 24)
+#define BNN_C2            40     // conv2 output channels (student: 40)
+#define BNN_FLAT          1960   // BNN_C2 * 7 * 7
+#define BNN_HIDDEN        96     // fc1 output (student: 96)
 
 // ---------------------------------------------------------------------------
 // Detection thresholds  (calibrate with sim_pipeline.py, then paste here)
