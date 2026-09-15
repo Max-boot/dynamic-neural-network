@@ -100,7 +100,7 @@
 // Window sizing: symmetric margin as a percent of the region side (integer math,
 // bit-identical to the sim), then a minimum side so the BNN always gets enough
 // pixels. The ceiling is the scene edge -> size is fully adaptive upward.
-#define MARGIN_PCT        15
+#define MARGIN_PCT        5
 #define WIN_FLOOR         24
 
 // --- legacy (REGION_MODE_REFOCUS / _BBOX only) ------------------------------
@@ -111,7 +111,7 @@
 // Safety ceiling on windows / BNN passes per frame (each pass is heavy on a plain
 // ESP32). With the adaptive proposer this is rarely reached -- it is a compute
 // guard, NOT a target. Regions are sorted by saliency, so the strongest win.
-#define MAX_WINDOWS       6
+#define MAX_WINDOWS       4
 #define MAX_DETS          8      // detections retained for overlay
 
 // ---------------------------------------------------------------------------

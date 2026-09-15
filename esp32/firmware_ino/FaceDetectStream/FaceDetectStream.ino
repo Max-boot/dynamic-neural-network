@@ -161,22 +161,30 @@ static void render_frame(const float* scene, const Detection* d, int nd) {
 static void camera_task(void* arg) {
   (void)arg;
   Detection dets[MAX_DETS];
+  unsigned long cam_cnt = 0;
   for (;;) {
+    unsigned long tc0 = millis();
     camera_fb_t* fb = esp_camera_fb_get();
     if (!fb) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
 
     build_scene(fb->buf, fb->width, fb->height, g_scene_local);
-    esp_camera_fb_return(fb);                 // release ASAP; scene is copied out
+    esp_camera_fb_return(fb);
 
-    shared_set_scene(g_scene_local);          // hand to inference (core 1)
+    shared_set_scene(g_scene_local);
 
-    int nd = shared_get_dets(dets, MAX_DETS); // latest results (may lag a frame)
+    int nd = shared_get_dets(dets, MAX_DETS);
     render_frame(g_scene_local, dets, nd);
 
+    unsigned long tc1 = millis();
     uint8_t* jpg = nullptr; size_t jlen = 0;
     if (fmt2jpg(g_rgb, DISP * DISP * 3, DISP, DISP, PIXFORMAT_RGB888, JPEG_QUALITY, &jpg, &jlen)) {
       shared_set_jpeg(jpg, jlen);
       free(jpg);
+    }
+    unsigned long tc2 = millis();
+    cam_cnt++;
+    if ((cam_cnt & 0x1F) == 0) {
+      Serial.printf("[cam] scene=%lu jpg=%lu total=%lu dets=%d\n", tc1-tc0, tc2-tc1, tc2-tc0, nd);
     }
     vTaskDelay(pdMS_TO_TICKS(1));
   }

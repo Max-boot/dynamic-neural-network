@@ -113,13 +113,13 @@ void inference_task(void* arg) {
   float  sal[N_TILES];
   Detection dets[MAX_DETS];
 
+  unsigned long frame_cnt = 0;
   for (;;) {
-    // Never dereference the model pointers unless the blobs actually loaded:
-    // nn_saliency/nn_bnn read g_sal/g_bnn, which are null when model_load_all
-    // failed (missing/wrong-size blobs) -> LoadProhibited at address 0.
     if (!nn_model_ready()) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
 
     if (!shared_get_scene(scene)) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+
+    unsigned long t0 = millis();
 
     nn_saliency(scene, sal);
     int nr = nn_regions(sal, regs, N_TILES);
@@ -138,21 +138,25 @@ void inference_task(void* arg) {
       int cls = argmax(probs, N_CLASS);
       float p_face = probs[FACE_CLASS];
 
-      // Binary head: P(bg)=1-P(face). One threshold on the face probability is
-      // the whole decision -- anything below is (uncertain or) background and
-      // gets no box at all.
       if (p_face < FACE_THR) continue;
 
-      float cx = box[0], cy = box[1], bw = box[2], bh = box[3];
-      dets[nd].x0 = (cx - bw / 2.0f) * W0 + wins[w].x0;
-      dets[nd].y0 = (cy - bh / 2.0f) * H0 + wins[w].y0;
-      dets[nd].x1 = (cx + bw / 2.0f) * W0 + wins[w].x0;
-      dets[nd].y1 = (cy + bh / 2.0f) * H0 + wins[w].y0;
+      // Student: box = full adaptive window (no fc3 refinement).
+      // Tighter box comes from tighter saliency windows, not from the network.
+      dets[nd].x0 = wins[w].x0;
+      dets[nd].y0 = wins[w].y0;
+      dets[nd].x1 = wins[w].x1;
+      dets[nd].y1 = wins[w].y1;
       dets[nd].cls = cls;
       dets[nd].conf = p_face;
       nd++;
     }
     shared_set_dets(dets, nd);
+
+    unsigned long dt = millis() - t0;
+    frame_cnt++;
+    if ((frame_cnt & 0x1F) == 0) {    // every 32 frames
+      Serial.printf("[infer] %lu ms  wins=%d dets=%d\n", dt, nw, nd);
+    }
     vTaskDelay(pdMS_TO_TICKS(1));       // yield to the scheduler
   }
 }
