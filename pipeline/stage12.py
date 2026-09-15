@@ -161,6 +161,79 @@ class ConvMLPSaliency(nn.Module):
         return self.tile_stats(feat)
 
 
+# ---------------------------------------------------------------------------
+# Linear Bottleneck (MobileNetV2) Saliency
+# ---------------------------------------------------------------------------
+
+class InvertedResidual(nn.Module):
+    """MobileNetV2 Inverted Residual Block.
+
+    expand -> depthwise 3x3 -> project (LINEAR bottleneck, no activation).
+    The key insight (Sandler et al. 2018): applying ReLU in the narrow
+    projection collapses the low-dimensional manifold. The output of the
+    project layer is therefore kept LINEAR. ReLU is applied only in the
+    wide expanded space.
+    """
+    def __init__(self, in_ch, out_ch, expand, stride=1):
+        super().__init__()
+        hidden = in_ch * expand
+        self.use_res = (stride == 1 and in_ch == out_ch)
+        layers = []
+        # Expand: 1x1 conv -> BN -> ReLU  (wide space, safe for ReLU)
+        if expand != 1:
+            layers += [nn.Conv2d(in_ch, hidden, 1, bias=False),
+                       nn.BatchNorm2d(hidden), nn.ReLU(inplace=True)]
+        # Depthwise: 3x3 groups=hidden -> BN -> ReLU
+        layers += [nn.Conv2d(hidden, hidden, 3, stride=stride, padding=1,
+                             groups=hidden, bias=False),
+                   nn.BatchNorm2d(hidden), nn.ReLU(inplace=True)]
+        # Project: 1x1 conv -> BN  (LINEAR bottleneck, no activation!)
+        layers += [nn.Conv2d(hidden, out_ch, 1, bias=False),
+                   nn.BatchNorm2d(out_ch)]
+        self.conv = nn.Sequential(*layers)
+
+    def forward(self, x):
+        out = self.conv(x)
+        return x + out if self.use_res else out
+
+
+class ConvBottleneckSaliency(nn.Module):
+    """Saliency network with MobileNetV2-style linear bottleneck blocks.
+
+    Replaces ConvStack + TileStats + MLP with a learned convolutional
+    pipeline. Key difference: the narrow projection layers use NO activation
+    (linear bottleneck), preserving information that ReLU would destroy.
+
+    Input:  [B, in_ch, 128, 128]  (scene, RGB or grayscale)
+    Output: [B, GRID*GRID]         (saliency logits, 8x8 grid)
+
+    Approximate param count: ~1920 floats (7.7 KB) vs MLP's 741 (2.9 KB).
+    Still compact enough for ESP32 PSRAM deployment with BN folding.
+    """
+    def __init__(self, in_ch=3):
+        super().__init__()
+        self.in_ch = in_ch
+        # Stride-2 Stem: 128 -> 64 direkt, spart Full-Res-Convs deutlich.
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_ch, 8, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(8), nn.ReLU(inplace=True))
+        # Downsample: 64 -> 32 -> 16 -> 8
+        self.ir1 = InvertedResidual(8, 8, expand=2, stride=2)    # [8, 32, 32]
+        self.ir2 = InvertedResidual(8, 12, expand=2, stride=2)   # [12, 16, 16]
+        self.ir3 = InvertedResidual(12, 12, expand=2, stride=2)  # [12, 8, 8]
+        self.ir4 = InvertedResidual(12, 8, expand=2, stride=1)   # [8, 8, 8]
+        # Linear head (no activation! the final linear bottleneck)
+        self.head = nn.Conv2d(8, 1, 1, bias=False)               # [1, 8, 8]
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.ir1(x)
+        x = self.ir2(x)
+        x = self.ir3(x)
+        x = self.ir4(x)
+        return self.head(x).flatten(1)                           # [B, 64]
+
+
 class ConvANFISSaliency(nn.Module):
     """Stage1+2 kombiniert: [B,C,128,128] -> saliency [B,GRID,GRID] (Logits)."""
     def __init__(self, n_in=3, n_mf=5, sigma_init=0.9, in_ch=1):
