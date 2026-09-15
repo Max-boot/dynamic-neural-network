@@ -41,9 +41,34 @@ struct BnnModel {
   const float*  fc2b;          // (2)
 };
 
+// One folded conv layer (BN already folded into w/b; head has b == nullptr).
+struct BSLayer {
+  const float* w;
+  const float* b;
+};
+
+// Linear-Bottleneck saliency (ConvBottleneckSaliency): pure conv net, outputs
+// the 8x8 saliency LOGITS directly (sigmoid applied in nn_saliency_bottleneck).
+// Block order (expand/dw/proj per inverted-residual):
+//   stem(8,3,3,3) ir1{exp(16,8,1,1) dw(16,1,3,3,s2) proj(8,16,1,1)}
+//   ir2{exp(16,8,1,1) dw(16,1,3,3,s2) proj(12,16,1,1)}
+//   ir3{exp(24,12,1,1) dw(24,1,3,3,s2) proj(12,24,1,1)}
+//   ir4{exp(24,12,1,1) dw(24,1,3,3,s1) proj(8,24,1,1)}
+//   head(1,8,1,1, no bias)
+struct BottleneckSaliencyModel {
+  const uint8_t* raw = nullptr;    // PROGMEM base of the whole blob
+  BSLayer stem;
+  BSLayer ir1e, ir1d, ir1p;
+  BSLayer ir2e, ir2d, ir2p;
+  BSLayer ir3e, ir3d, ir3p;
+  BSLayer ir4e, ir4d, ir4p;
+  BSLayer head;
+};
+
 // Global model instances (defined in model.cpp).
 extern SaliencyModel g_sal;
 extern BnnModel      g_bnn;
+extern BottleneckSaliencyModel g_bn_sal;
 
 // Mount LittleFS. Returns false on failure.
 bool storage_begin();

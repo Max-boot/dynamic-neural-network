@@ -16,6 +16,8 @@ bool nn_begin();
 
 // Stage 1+2: scene[N_CH*SCENE*SCENE] (channel-major RGB float 0..1, planes R,G,B)
 // -> sal[N_TILES] (8x8, row-major), each a sigmoid saliency probability.
+// Implements the model selected by SALIENCY_MODEL in config.h (MLP head or
+// linear-bottleneck conv net); both mirror their host reference exactly.
 void nn_saliency(const float* scene, float* sal /*[N_TILES]*/);
 
 // Stage 3a: proposal regions from the saliency map. REGION_MODE_ADAPTIVE uses

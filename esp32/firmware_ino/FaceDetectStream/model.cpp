@@ -7,10 +7,12 @@
 #include "config.h"
 #include "face_saliency_bin_data.h"
 #include "face_bnn_bin_data.h"
+#include "face_saliency_bottleneck_bin_data.h"
 #include <LittleFS.h>
 
 SaliencyModel g_sal;
 BnnModel      g_bnn;
+BottleneckSaliencyModel g_bn_sal;
 
 bool storage_begin() {
   if (LittleFS.begin(false)) return true;
@@ -80,12 +82,57 @@ static bool parse_bnn() {
   return true;
 }
 
+// ----------------------------------------------------------------------------
+//  Bottleneck-Saliency-Blob: alle BN gefaltet, Sequenz [w,b] je Layer:
+//    stem(216,8) ir1{exp(128,16) dw(144,16) proj(128,8)}
+//    ir2{exp(128,16) dw(144,16) proj(192,12)}
+//    ir3{exp(288,24) dw(216,24) proj(288,12)}
+//    ir4{exp(288,24) dw(216,24) proj(192,8)}
+//    head(8, kein Bias)                               -> 2784 floats / 11136 B
+// ----------------------------------------------------------------------------
+static bool parse_bn_saliency() {
+  const uint8_t* b = face_saliency_bottleneck_data;   // PROGMEM base
+  size_t o = 0;
+
+  auto R = [&](size_t n) -> const float* {
+    const float* r = (const float*)(b + o); o += n * 4; return r;
+  };
+  auto L = [&](size_t nw, size_t nb) {                 // one (w,b) layer
+    BSLayer l;
+    l.w = R(nw); l.b = R(nb);
+    return l;
+  };
+  g_bn_sal.raw = b;
+  g_bn_sal.stem = L(8 * 3 * 3 * 3, 8);                 // 216 + 8
+  g_bn_sal.ir1e = L(16 * 8, 16);                       // 128 + 16
+  g_bn_sal.ir1d = L(16 * 9, 16);                       // 144 + 16  (dw: O,1,3,3)
+  g_bn_sal.ir1p = L(8 * 16, 8);                        // 128 + 8
+  g_bn_sal.ir2e = L(16 * 8, 16);                       // 128 + 16
+  g_bn_sal.ir2d = L(16 * 9, 16);                       // 144 + 16
+  g_bn_sal.ir2p = L(12 * 16, 12);                      // 192 + 12
+  g_bn_sal.ir3e = L(24 * 12, 24);                      // 288 + 24
+  g_bn_sal.ir3d = L(24 * 9, 24);                       // 216 + 24
+  g_bn_sal.ir3p = L(12 * 24, 12);                      // 288 + 12
+  g_bn_sal.ir4e = L(24 * 12, 24);                      // 288 + 24
+  g_bn_sal.ir4d = L(24 * 9, 24);                       // 216 + 24
+  g_bn_sal.ir4p = L(8 * 24, 8);                        // 192 + 8
+  g_bn_sal.head.w = R(1 * 8);                          // 8 (head: no bias)
+  g_bn_sal.head.b = nullptr;
+  if (o != FACE_SALIENCY_BOTTLENECK_BYTES) {
+    Serial.printf("[model] bottleneck parse offset %u != %u\n",
+                  (unsigned)o, (unsigned)FACE_SALIENCY_BOTTLENECK_BYTES);
+    return false;
+  }
+  Serial.println("[model] bottleneck saliency parsed (embedded)");
+  return true;
+}
+
 bool model_load_all() {
-  return parse_saliency() && parse_bnn();
+  return parse_saliency() && parse_bn_saliency() && parse_bnn();
 }
 
 bool nn_model_ready() {
-  return g_sal.raw != nullptr && g_bnn.raw != nullptr;
+  return g_sal.raw != nullptr && g_bnn.raw != nullptr && g_bn_sal.raw != nullptr;
 }
 
 int model_store_file(const char* path, const uint8_t* data, size_t len) {

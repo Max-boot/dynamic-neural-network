@@ -6,8 +6,8 @@ over WiFi, with the ESP32 acting as the HTTP server. Inference and the
 camera/stream run on **separate cores**.
 
 ```
-Core 1  inference_task : scene -> Conv+ANFIS saliency -> regions -> refocus
-                         windows -> int8 BNN + box head -> detections
+Core 1  inference_task : scene -> saliency (MLP head or linear bottleneck) ->
+                         regions -> adaptive windows -> int8 BNN -> detections
 Core 0  camera_task    : capture -> build 128x128 scene -> draw boxes -> JPEG
 Core 0  http server    : MJPEG stream + model upload + status
 ```
@@ -74,9 +74,20 @@ To join your own network instead, set `WIFI_AP_MODE 0` and fill `STA_SSID` /
 
 ## 4. Model blobs are embedded (no upload needed)
 
-The trained blobs (`esp32/models/face_saliency.bin` 2964 B, `face_bnn.bin`
-878808 B) are compiled directly into the firmware as PROGMEM arrays. After
-flashing, the model is **already there** — no LittleFS upload, no reboot dance.
+The trained blobs are compiled directly into the firmware as PROGMEM arrays.
+After flashing, the models are **already there** — no LittleFS upload, no reboot
+dance. The embedded blobs and their sizes:
+
+| Blob | Size | Description |
+|------|------|-------------|
+| `face_saliency.bin` | 2964 B | Original MLP saliency (ConvStack + TileStats + MLP head) |
+| `face_saliency_bottleneck.bin` | 11136 B | Linear-bottleneck saliency (ConvBottleneckSaliency) |
+| `face_bnn_student.bin` | 227112 B | Distilled student BNN (no box head) |
+
+Which saliency runs is set by `SALIENCY_MODEL` in `config.h`
+(`SALIENCY_MLP` = 0 or `SALIENCY_BOTTLENECK` = 1; default bottleneck). Both
+blobs are always embedded — the switch only affects which path `nn_saliency()`
+runs and which PSRAM scratch is allocated.
 
 If you replace the models, regenerate the embeds before compiling:
 
@@ -142,13 +153,14 @@ box) is also available (`REGION_MODE` in `config.h`).
 | `camera_pins.h` | AI-Thinker GPIO map |
 | `model.h/.cpp` | embedded blob access: PROGMEM arrays -> typed pointers into flash |
 | `face_saliency_bin_data.h` | auto-generated embed of `face_saliency.bin` |
-| `face_bnn_bin_data.h` | auto-generated embed of `face_bnn.bin` |
+| `face_saliency_bottleneck_bin_data.h` | auto-generated embed of `face_saliency_bottleneck.bin` |
+| `face_bnn_bin_data.h` | auto-generated embed of `face_bnn_student.bin` |
 | `gen_blob_headers.py` | regenerates the `*_bin_data.h` embeds from the blobs |
-| `nn.h/.cpp` | forward pass: saliency (Conv+ANFIS), regions (BFS), windows, int8 BNN + box |
+| `nn.h/.cpp` | forward pass: saliency (MLP or bottleneck), regions (hysteresis), adaptive windows, int8 BNN |
 | `pipeline.h/.cpp` | mutex-guarded shared state + the core-1 inference loop |
 | `web.h/.cpp` | esp_http_server: index, MJPEG stream, status |
 | `../tools/sim_pipeline.py` | NumPy reference the firmware mirrors — use it to calibrate |
-| `../models/*.bin` | the trained blobs (`face_saliency.bin` 2964 B, `face_bnn.bin` 878808 B) |
+| `../models/*.bin` | the trained blobs (saliency 2964 B, bottleneck 11136 B, student BNN 227112 B) |
 
 ---
 

@@ -31,6 +31,19 @@
                                                // (MLP head: conv 8/4ch + fc 12-16-1)
 #define BNN_BYTES         227112                // student blob (no box head)
 
+// Linear-Bottleneck-Saliency (ConvBottleneckSaliency): 14 gefaltete Conv-Layer,
+// 2576 Gewichte + 208 Biases = 2784 floats -> 11136 B. Erzeugt von
+// pipeline/export_esp32_bottleneck.py.
+#define SALIENCY_BOTTLENECK_BYTES 11136
+
+// Welche Saliency laeuft: SALIENCY_MLP (bisheriger MLP-Kopf) oder
+// SALIENCY_BOTTLENECK (MobileNetV2-artige lineare Bottlenecks, direkte 8x8-
+// Logits). Beide Blobs sind eingebettet; nur der PSRAM-Scratch wird je nach
+// Auswahl allokiert.
+#define SALIENCY_MLP        0
+#define SALIENCY_BOTTLENECK 1
+#define SALIENCY_MODEL      SALIENCY_BOTTLENECK
+
 // ---------------------------------------------------------------------------
 // Pipeline geometry (fixed by the trained model -- do NOT change)
 // ---------------------------------------------------------------------------

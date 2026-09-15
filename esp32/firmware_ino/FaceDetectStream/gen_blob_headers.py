@@ -25,6 +25,8 @@ _MODELS = os.path.normpath(os.path.join(_HERE, "..", "..", "models"))
 BLOBS = [
     ("face_saliency.bin", "FACE_SALIENCY", "face_saliency_bin_data.h"),
     ("face_bnn_student.bin", "FACE_BNN",   "face_bnn_bin_data.h"),
+    ("face_saliency_bottleneck.bin", "FACE_SALIENCY_BOTTLENECK",
+     "face_saliency_bottleneck_bin_data.h"),
 ]
 
 

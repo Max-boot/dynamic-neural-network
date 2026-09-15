@@ -12,8 +12,24 @@
 #include <math.h>
 
 // ---- PSRAM scratch ---------------------------------------------------------
+#if SALIENCY_MODEL == SALIENCY_MLP
 static float* s_f1 = nullptr;   // [8,128,128]
 static float* s_f2 = nullptr;   // [4,128,128]
+#else
+static float* bn_stem = nullptr;  // [8,64,64]
+static float* bn_e1   = nullptr;  // [16,64,64]
+static float* bn_d1   = nullptr;  // [16,32,32]
+static float* bn_p1   = nullptr;  // [8,32,32]
+static float* bn_e2   = nullptr;  // [16,32,32]
+static float* bn_d2   = nullptr;  // [16,16,16]
+static float* bn_p2   = nullptr;  // [12,16,16]
+static float* bn_e3   = nullptr;  // [24,16,16]
+static float* bn_d3   = nullptr;  // [24,8,8]
+static float* bn_p3   = nullptr;  // [12,8,8]
+static float* bn_e4   = nullptr;  // [24,8,8]
+static float* bn_d4   = nullptr;  // [24,8,8]
+static float* bn_p4   = nullptr;  // [8,8,8]
+#endif
 static float* b_f1 = nullptr;   // [BNN_C1,28,28]
 static float* b_p1 = nullptr;   // [BNN_C1,14,14]
 static float* b_f2 = nullptr;   // [BNN_C2,14,14]
@@ -26,13 +42,35 @@ static float* palloc(size_t n) {
 }
 
 bool nn_begin() {
+#if SALIENCY_MODEL == SALIENCY_MLP
   s_f1 = palloc(8 * SCENE * SCENE);
   s_f2 = palloc(4 * SCENE * SCENE);
+#else
+  bn_stem = palloc(8 * 64 * 64);
+  bn_e1   = palloc(16 * 64 * 64);
+  bn_d1   = palloc(16 * 32 * 32);
+  bn_p1   = palloc(8 * 32 * 32);
+  bn_e2   = palloc(16 * 32 * 32);
+  bn_d2   = palloc(16 * 16 * 16);
+  bn_p2   = palloc(12 * 16 * 16);
+  bn_e3   = palloc(24 * 16 * 16);
+  bn_d3   = palloc(24 * 8 * 8);
+  bn_p3   = palloc(12 * 8 * 8);
+  bn_e4   = palloc(24 * 8 * 8);
+  bn_d4   = palloc(24 * 8 * 8);
+  bn_p4   = palloc(8 * 8 * 8);
+#endif
   b_f1 = palloc(BNN_C1 * CROP * CROP);
   b_p1 = palloc(BNN_C1 * 14 * 14);
   b_f2 = palloc(BNN_C2 * 14 * 14);
   b_p2 = palloc(BNN_C2 * 7 * 7);
+#if SALIENCY_MODEL == SALIENCY_MLP
   bool ok = s_f1 && s_f2 && b_f1 && b_p1 && b_f2 && b_p2;
+#else
+  bool ok = bn_stem && bn_e1 && bn_d1 && bn_p1 && bn_e2 && bn_d2 &&
+            bn_p2 && bn_e3 && bn_d3 && bn_p3 && bn_e4 && bn_d4 &&
+            bn_p4 && b_f1 && b_p1 && b_f2 && b_p2;
+#endif
   if (!ok) Serial.println("[nn] scratch alloc failed");
   return ok;
 }
@@ -85,6 +123,89 @@ static void maxpool2(const float* in, int C, int H, int W, float* out) {
   }
 }
 
+// ---- Linear-Bottleneck primitives (BN folded; see export_esp32_bottleneck) --
+
+// 1x1 conv, stride 1, no pad. in[C,H,W] w[O,C,1,1] -> out[O,H,W].
+// b may be nullptr (head has no bias). relu=false are the LINEAR bottlenecks.
+static void conv1x1(const float* in, int C, int H, int W,
+                    const float* w, const float* b, int O,
+                    float* out, bool relu) {
+  const int HW = H * W;
+  for (int o = 0; o < O; o++) {
+    const float bias = b ? b[o] : 0.0f;
+    const float* wrow = w + o * C;
+    float* od = out + (size_t)o * HW;
+    for (int p = 0; p < HW; p++) {
+      float acc = bias;
+      for (int i = 0; i < C; i++) acc += wrow[i] * in[(size_t)i * HW + p];
+      od[p] = (relu && acc < 0.0f) ? 0.0f : acc;
+    }
+  }
+}
+
+// 3x3 conv, stride 2, same-pad, ReLU (the stem). in[C,H,W] -> out[O,OH,OW]
+// with OH=(H-1)/2+1, OW=(W-1)/2+1. Mirrors PyTorch Conv2d(stride=2,pad=1).
+static void conv3x3_s2_relu(const float* in, int C, int H, int W,
+                            const float* w, const float* b, int O,
+                            float* out) {
+  const int OH = (H - 1) / 2 + 1, OW = (W - 1) / 2 + 1;
+  for (int o = 0; o < O; o++) {
+    const float bias = b[o];
+    const float* wp = w + (size_t)o * C * 9;
+    for (int y = 0; y < OH; y++) {
+      for (int x = 0; x < OW; x++) {
+        float acc = bias;
+        for (int i = 0; i < C; i++) {
+          const float* ip = in + (size_t)i * H * W;
+          const float* wr = wp + i * 9;
+          for (int dy = -1; dy <= 1; dy++) {
+            int yy = 2 * y + dy;
+            if (yy < 0 || yy >= H) continue;
+            const float* row = ip + yy * W;
+            const float* w3 = wr + (dy + 1) * 3;
+            for (int dx = -1; dx <= 1; dx++) {
+              int xx = 2 * x + dx;
+              if (xx < 0 || xx >= W) continue;
+              acc += w3[dx + 1] * row[xx];
+            }
+          }
+        }
+        out[(size_t)o * OH * OW + y * OW + x] = acc > 0.0f ? acc : 0.0f;
+      }
+    }
+  }
+}
+
+// 3x3 DEPTHWISE conv, same-pad + ReLU. w[O,1,3,3] (groups=O). stride 1 or 2.
+// out[O, (H-1)/stride+1, (W-1)/stride+1]; output channel o reads input channel o.
+static void dw3x3_relu(const float* in, int C, int H, int W,
+                       const float* w, const float* b, int stride,
+                       float* out) {
+  const int OH = (H - 1) / stride + 1, OW = (W - 1) / stride + 1;
+  for (int o = 0; o < C; o++) {
+    const float bias = b[o];
+    const float* wr = w + (size_t)o * 9;
+    const float* ip = in + (size_t)o * H * W;
+    for (int y = 0; y < OH; y++) {
+      for (int x = 0; x < OW; x++) {
+        float acc = bias;
+        for (int dy = -1; dy <= 1; dy++) {
+          int yy = stride * y + dy;
+          if (yy < 0 || yy >= H) continue;
+          const float* row = ip + yy * W;
+          const float* w3 = wr + (dy + 1) * 3;
+          for (int dx = -1; dx <= 1; dx++) {
+            int xx = stride * x + dx;
+            if (xx < 0 || xx >= W) continue;
+            acc += w3[dx + 1] * row[xx];
+          }
+        }
+        out[(size_t)o * OH * OW + y * OW + x] = acc > 0.0f ? acc : 0.0f;
+      }
+    }
+  }
+}
+
 // ---- bilinear resize of a scene sub-rectangle (all N_CH planes) -------------
 void nn_crop_resize(const float* scene, int x0, int y0, int w, int h,
                     float* dst, int size) {
@@ -117,7 +238,8 @@ void nn_crop_resize(const float* scene, int x0, int y0, int w, int h,
 }
 
 // ---- Stage 1+2: saliency ---------------------------------------------------
-void nn_saliency(const float* scene, float* sal) {
+#if SALIENCY_MODEL == SALIENCY_MLP
+void nn_saliency_mlp(const float* scene, float* sal) {
   conv3x3_same_relu(scene, N_CH, SCENE, SCENE, g_sal.c1w, g_sal.c1b, 8, s_f1);
   conv3x3_same_relu(s_f1, 8, SCENE, SCENE, g_sal.c2w, g_sal.c2b, 4, s_f2);
 
@@ -188,6 +310,55 @@ void nn_saliency(const float* scene, float* sal) {
     for (int o = 0; o < 16; o++) y += (double)fc2w[o] * h[o];
     sal[t] = (float)(1.0 / (1.0 + exp(-y)));
   }
+}
+#endif  // SALIENCY_MLP
+
+#if SALIENCY_MODEL == SALIENCY_BOTTLENECK
+// Linear-Bottleneck saliency (ConvBottleneckSaliency): pure conv net that maps
+// the 128x128 scene straight to the 8x8 saliency LOGITS -- no tile stats, no
+// instance-norm, no MLP. Mirrors export_esp32_bottleneck.numpy_forward 1:1.
+//   stem s2 (128->64) -> ir1 64->32 -> ir2 32->16 -> ir3 16->8 -> ir4 8->8 ->
+//   head 1x1 (linear) -> sigmoid per tile. Only proj<conv> and the head are
+//   LINEAR bottlenecks; every other stage is +ReLU.
+void nn_saliency_bottleneck(const float* scene, float* sal) {
+  conv3x3_s2_relu(scene, N_CH, SCENE, SCENE, g_bn_sal.stem.w, g_bn_sal.stem.b,
+                  8, bn_stem);                                   // [8,64,64]
+
+  // ir1: 8 -> 16 (exp) -> 16 (dw s2) -> 8 (proj)
+  conv1x1(bn_stem, 8, 64, 64, g_bn_sal.ir1e.w, g_bn_sal.ir1e.b, 16, bn_e1, true);
+  dw3x3_relu(bn_e1, 16, 64, 64, g_bn_sal.ir1d.w, g_bn_sal.ir1d.b, 2, bn_d1);
+  conv1x1(bn_d1, 16, 32, 32, g_bn_sal.ir1p.w, g_bn_sal.ir1p.b, 8, bn_p1, false);
+
+  // ir2: 8 -> 16 (exp) -> 16 (dw s2) -> 12 (proj)
+  conv1x1(bn_p1, 8, 32, 32, g_bn_sal.ir2e.w, g_bn_sal.ir2e.b, 16, bn_e2, true);
+  dw3x3_relu(bn_e2, 16, 32, 32, g_bn_sal.ir2d.w, g_bn_sal.ir2d.b, 2, bn_d2);
+  conv1x1(bn_d2, 16, 16, 16, g_bn_sal.ir2p.w, g_bn_sal.ir2p.b, 12, bn_p2, false);
+
+  // ir3: 12 -> 24 (exp) -> 24 (dw s2) -> 12 (proj)
+  conv1x1(bn_p2, 12, 16, 16, g_bn_sal.ir3e.w, g_bn_sal.ir3e.b, 24, bn_e3, true);
+  dw3x3_relu(bn_e3, 24, 16, 16, g_bn_sal.ir3d.w, g_bn_sal.ir3d.b, 2, bn_d3);
+  conv1x1(bn_d3, 24, 8, 8, g_bn_sal.ir3p.w, g_bn_sal.ir3p.b, 12, bn_p3, false);
+
+  // ir4: 12 -> 24 (exp) -> 24 (dw s1) -> 8 (proj)
+  conv1x1(bn_p3, 12, 8, 8, g_bn_sal.ir4e.w, g_bn_sal.ir4e.b, 24, bn_e4, true);
+  dw3x3_relu(bn_e4, 24, 8, 8, g_bn_sal.ir4d.w, g_bn_sal.ir4d.b, 1, bn_d4);
+  conv1x1(bn_d4, 24, 8, 8, g_bn_sal.ir4p.w, g_bn_sal.ir4p.b, 8, bn_p4, false);
+
+  // head: 1x1 8 -> 1 (lineares Bottleneck, kein Bias) -> 64 Logits -> sigmoid.
+  float logits[N_TILES];
+  conv1x1(bn_p4, 8, 8, 8, g_bn_sal.head.w, g_bn_sal.head.b, 1, logits, false);
+  for (int t = 0; t < N_TILES; t++) {
+    sal[t] = (float)(1.0 / (1.0 + exp(-logits[t])));
+  }
+}
+#endif  // SALIENCY_BOTTLENECK
+
+void nn_saliency(const float* scene, float* sal) {
+#if SALIENCY_MODEL == SALIENCY_BOTTLENECK
+  nn_saliency_bottleneck(scene, sal);
+#else
+  nn_saliency_mlp(scene, sal);
+#endif
 }
 
 // ---- Stage 3a: proposal regions from the saliency map ----------------------
